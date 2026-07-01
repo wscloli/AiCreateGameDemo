@@ -1,0 +1,166 @@
+﻿/**
+ * GameLoop.ts
+ *
+ * 战斗场景中【唯一的 update 发动机】
+ */
+
+import { _decorator, Component, find, Vec3, Node } from 'cc';
+import { PoolManager } from './PoolManager';
+import { GameManager, GameState } from './GameManager';
+import { PlayerController } from '../Player/PlayerController';
+import { WeaponSystem } from '../Player/WeaponSystem';
+import { EventBus } from './EventBus';
+import { VFXManager } from './VFXManager';
+import { BaseBullet } from '../Bullets/BaseBullet';
+import { OilBullet } from '../Bullets/OilBullet';
+import { FireBullet } from '../Bullets/FireBullet';
+import { LightningBullet } from '../Bullets/LightningBullet';
+import { WaterBullet } from '../Bullets/WaterBullet';
+import { EnemyManager } from '../Enemy/EnemyManager';
+import { EnemyStatusComponent } from '../Enemy/EnemyStatusComponent';
+
+const { ccclass, property } = _decorator;
+
+const BULLET_CLASSES: (new () => BaseBullet)[] = [OilBullet, FireBullet, LightningBullet, WaterBullet];
+
+export interface FrameDebugInfo {
+    bulletCount: number;
+    enemyCount: number;
+    dt: number;
+}
+
+@ccclass('GameLoop')
+export class GameLoop extends Component {
+    @property
+    public playerNodePath: string = '';
+
+    @property
+    public enableDebugLog: boolean = false;
+
+    @property
+    public debugLogInterval: number = 60;
+
+    private _frameCount: number = 0;
+    private _playerController: PlayerController | null = null;
+    private _weaponSystem: WeaponSystem | null = null;
+    private _gameManager: GameManager | null = null;
+    private _isRunning: boolean = false;
+    private _playerResolved: boolean = false;
+    private _vfxManager: VFXManager | null = null;
+
+    private _debugInfo: FrameDebugInfo = { bulletCount: 0, enemyCount: 0, dt: 0 };
+
+    protected onLoad(): void {
+        this._gameManager = this.node.getComponent(GameManager);
+        EventBus.on('QUERY_PLAYER_POSITION', this._onQueryPlayerPosition, this);
+    }
+
+    protected onDestroy(): void {
+        EventBus.off('QUERY_PLAYER_POSITION', this._onQueryPlayerPosition, this);
+    }
+
+    private _onQueryPlayerPosition(callback: (pos: Vec3) => void): void {
+        if (this._playerController) {
+            callback(this._playerController.node.position);
+        }
+    }
+
+    protected update(dt: number): void {
+        if (!this._isRunning) return;
+
+        // 延迟解析玩家节点
+        if (!this._playerResolved) {
+            let playerNode: Node | null = null;
+            if (this.playerNodePath) {
+                playerNode = find(this.playerNodePath);
+            } else {
+                const allPlayerControllers = this.node.scene?.getComponentsInChildren(PlayerController);
+                if (allPlayerControllers && allPlayerControllers.length > 0) {
+                    this._playerController = allPlayerControllers[0];
+                    playerNode = this._playerController.node;
+                }
+            }
+            if (playerNode) {
+                if (!this._playerController) {
+                    this._playerController = playerNode.getComponent(PlayerController);
+                }
+                this._weaponSystem = playerNode.getComponent(WeaponSystem);
+                this._playerResolved = true;
+                console.log('[GameLoop] 玩家节点已就绪: ' + playerNode.name);
+            }
+        }
+
+        const safeDt = Math.min(dt, 0.05);
+        this._frameCount++;
+        this._debugInfo.dt = safeDt;
+
+        // P1: 玩家 + 武器系统
+        this._playerController?.tick(safeDt);
+        this._weaponSystem?.tick(safeDt);
+
+        // P2: 子弹
+        let totalBullets = 0;
+        for (const bulletClass of BULLET_CLASSES) {
+            const bullets = PoolManager.getActiveList(bulletClass);
+            totalBullets += bullets.length;
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                bullets[i].tick(safeDt);
+            }
+        }
+        this._debugInfo.bulletCount = totalBullets;
+
+        // P3: 敌人
+        EnemyManager.tick(safeDt);
+        this._debugInfo.enemyCount = EnemyManager.aliveCount;
+
+        // P4: 波次
+        this._gameManager?.tick(safeDt);
+
+        // P5: 元素衰减
+        const enemies = PoolManager.getActiveList(EnemyStatusComponent);
+        for (let i = enemies.length - 1; i >= 0; i--) {
+            enemies[i].tick(safeDt);
+        }
+
+        // P6: 视觉特效
+        if (!this._vfxManager) {
+            const canvas = this.node.scene?.getChildByName('Canvas');
+            if (canvas) {
+                this._vfxManager = canvas.getComponent(VFXManager);
+            }
+        }
+        this._vfxManager?.tick(safeDt);
+
+        if (this.enableDebugLog && this._frameCount % this.debugLogInterval === 0) {
+            console.log(
+                '[GameLoop] 帧#' + this._frameCount +
+                ' 子弹:' + this._debugInfo.bulletCount +
+                ' 敌人:' + this._debugInfo.enemyCount +
+                ' dt:' + (safeDt * 1000).toFixed(1) + 'ms'
+            );
+        }
+    }
+
+    public startLoop(): void {
+        this._isRunning = true;
+        this._frameCount = 0;
+        console.log('[GameLoop] 主循环启动');
+    }
+
+    public stopLoop(): void {
+        this._isRunning = false;
+        console.log('[GameLoop] 主循环停止');
+    }
+
+    public reset(): void {
+        this._isRunning = false;
+        this._frameCount = 0;
+        this._playerResolved = false;
+        this._playerController = null;
+        this._weaponSystem = null;
+    }
+
+    public getDebugInfo(): FrameDebugInfo {
+        return { ...this._debugInfo };
+    }
+}
