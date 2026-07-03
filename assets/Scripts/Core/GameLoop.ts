@@ -98,7 +98,17 @@ export class GameLoop extends Component {
         this._playerController?.tick(safeDt);
         this._weaponSystem?.tick(safeDt);
 
-        // P2: 子弹
+        // P2: 敌人移动（先移动，让子弹看到最新位置）
+        const enemies = PoolManager.getActiveList(EnemyStatusComponent);
+        for (let i = enemies.length - 1; i >= 0; i--) {
+            enemies[i].tick(safeDt);
+        }
+
+        // P3: 重建四叉树（用敌人最新位置）
+        EnemyManager.tick(safeDt);
+        this._debugInfo.enemyCount = EnemyManager.aliveCount;
+
+        // P4: 子弹（移动 + 碰撞检测，查的是刚重建的四叉树）
         let totalBullets = 0;
         for (const bulletClass of BULLET_CLASSES) {
             const bullets = PoolManager.getActiveList(bulletClass);
@@ -109,18 +119,8 @@ export class GameLoop extends Component {
         }
         this._debugInfo.bulletCount = totalBullets;
 
-        // P3: 敌人
-        EnemyManager.tick(safeDt);
-        this._debugInfo.enemyCount = EnemyManager.aliveCount;
-
-        // P4: 波次
+        // P5: 波次
         this._gameManager?.tick(safeDt);
-
-        // P5: 元素衰减
-        const enemies = PoolManager.getActiveList(EnemyStatusComponent);
-        for (let i = enemies.length - 1; i >= 0; i--) {
-            enemies[i].tick(safeDt);
-        }
 
         // P6: 视觉特效
         if (!this._vfxManager) {
@@ -164,3 +164,4 @@ export class GameLoop extends Component {
         return { ...this._debugInfo };
     }
 }
+

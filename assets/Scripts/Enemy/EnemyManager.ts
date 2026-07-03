@@ -72,12 +72,18 @@ export class EnemyManager extends Component {
      * 更新四叉树中的敌人位置
      */
     public static tick(dt: number): void {
-        for (const [enemyId, entity] of EnemyManager._enemyQuadEntities) {
-            const component = EnemyManager._enemies.get(enemyId);
-            if (component) {
-                const pos = component.node.position;
+        // 每帧重建四叉树：清空后按敌人当前位置重新插入
+        // 解决敌人跨越象限边界后四叉树查不到的问题
+        if (!EnemyManager._quadtree) return;
+        EnemyManager._quadtree.clear();
+        for (const [enemyId, component] of EnemyManager._enemies) {
+            if (!component?.node?.isValid) continue;
+            const pos = component.node.position;
+            const entity = EnemyManager._enemyQuadEntities.get(enemyId);
+            if (entity) {
                 entity.x = pos.x;
                 entity.y = pos.y;
+                EnemyManager._quadtree.insert(entity);
             }
         }
     }
@@ -259,3 +265,4 @@ export class EnemyManager extends Component {
         return EnemyManager._enemyConfigs.get(enemyId);
     }
 }
+
