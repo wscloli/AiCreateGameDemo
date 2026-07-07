@@ -394,6 +394,365 @@ if (gameRoot && gameRoot.parent !== canvas) {
 
 ---
 
-*文档版本：2026-07-01*
+## 9. 移动系统实现详解
+
+> 本文档记录项目中所有移动相关的实现方案，作为后续开发参考。
+
+### 9.1 玩家拖拽移动（PlayerController）
+
+#### 坐标系架构
+
+```
+屏幕触摸坐标 (getUILocation)
+       ↓
+[UITransform.convertToNodeSpaceAR]
+       ↓
+玩家父节点局部坐标 (node.position)
+```
+
+| 坐标系 | 获取方式 | 用途 |
+|--------|----------|------|
+| UI 空间 | `event.getUILocation()` | 触摸事件原始输入 |
+| 父节点局部空间 | `convertToNodeSpaceAR()` | 玩家 `node.position` 所在坐标系 |
+| 世界空间 | `cam.node.worldPosition` | 相机位置、边界计算 |
+
+**关键设计**：使用 `convertToNodeSpaceAR()` 而非手动计算，自动处理：
+- 父节点位移偏移
+- 父节点缩放比例
+- 多层节点嵌套
+- Canvas 适配缩放
+
+#### 核心代码
+
+```typescript
+// 1. 触摸坐标 → 父节点局部坐标
+private _uiToParentSpace(event: EventTouch): Vec3 {
+    const outPos = new Vec3();
+    const touchPos = event.getUILocation();
+    this._parentUITransform.convertToNodeSpaceAR(
+        new Vec3(touchPos.x, touchPos.y, 0),
+        outPos
+    );
+    return outPos;
+}
+
+// 2. 记录初始偏移（保持手指-角色相对位置）
+private _onTouchStart(event: EventTouch): void {
+    const parentPos = this._uiToParentSpace(event);
+    const pos = this.node.position;
+    this._dragOffset.set(pos.x - parentPos.x, pos.y - parentPos.y, 0);
+}
+
+// 3. 移动时计算目标位置（含偏移）
+private _onTouchMove(event: EventTouch): void {
+    const parentPos = this._uiToParentSpace(event);
+    const rawTarget = new Vec3(
+        parentPos.x + this._dragOffset.x,
+        parentPos.y + this._dragOffset.y,
+        this.node.position.z,
+    );
+    this._targetPosition = this._clampPosition(rawTarget);
+}
+
+// 4. tick 中应用位置（带可选平滑）
+private _tickMovement(_dt: number): void {
+    if (this.moveSmoothing <= 0) {
+        nextPos = this._targetPosition.clone(); // 瞬间跟手
+    } else {
+        const t = 1 - Math.pow(1 - this.moveSmoothing, 60 * _dt);
+        nextPos = new Vec3(
+            pos.x + (this._targetPosition.x - pos.x) * t, // lerp
+            pos.y + (this._targetPosition.y - pos.y) * t,
+            pos.z,
+        );
+    }
+    this.node.setPosition(this._clampPosition(nextPos));
+}
+```
+
+#### 边界限制
+
+动态读取相机参数，并正确映射回玩家父节点局部坐标系：
+
+```typescript
+private _getCameraBounds(): { minX, maxX, minY, maxY } {
+    const halfH = cam.orthoHeight;
+    const halfW = halfH * (windowSize.width / windowSize.height);
+    
+    // 相机世界位置 → 父节点局部位置
+    const camLocalPos = new Vec3();
+    this._parentUITransform.node.inverseTransformPoint(camLocalPos, camWorldPos);
+    
+    // 考虑父节点缩放
+    const parentScale = this._parentUITransform.node.scale;
+    const finalHalfW = halfW / Math.abs(parentScale.x);
+    const finalHalfH = halfH / Math.abs(parentScale.y);
+    
+    return {
+        minX: camLocalPos.x - finalHalfW,
+        maxX: camLocalPos.x + finalHalfW,
+        minY: camLocalPos.y - finalHalfH,
+        maxY: camLocalPos.y + finalHalfH
+    };
+}
+```
+
+#### 设计要点
+
+1. **偏移模式**：按下时记录 `pos - touchPos`，移动时 `touchPos + offset`，保证角色始终保持在手指的相对位置
+2. **平滑插值**：`moveSmoothing = 0` 时瞬间跟手；`>0` 时使用指数缓动 lerp
+3. **边界钳制**：限制 `setPosition` 的最终输出，而非限制 `_targetPosition`（避免破坏偏移关系）
+4. **坐标转换**：全程使用 `convertToNodeSpaceAR` 处理父节点缩放/位移，避免手动计算误差
+
+---
+
+### 9.2 敌人 AI 移动（EnemyStatusComponent）
+
+#### 移动逻辑
+
+```typescript
+private _tickMoveToPlayer(dt: number): void {
+    // 1. 查询玩家位置（通过 EventBus 解耦）
+    EventBus.emit('QUERY_PLAYER_POSITION', (pos) => {
+        targetPos = { x: pos.x, y: pos.y };
+    });
+    
+    // 2. 计算朝向玩家的基础速度
+    const dx = targetPos.x - pos.x;
+    const dy = targetPos.y - pos.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    let vx = (dx / dist) * this.moveSpeed;
+    let vy = (dy / dist) * this.moveSpeed;
+    
+    // 3. 软碰撞排斥（与其他敌人）
+    for (const [id, other] of enemies) {
+        if (id === this.enemyId) continue;
+        
+        const ox = other.node.position.x - pos.x;
+        const oy = other.node.position.y - pos.y;
+        const oDist = Math.sqrt(ox * ox + oy * oy);
+        const minDist = myRadius + otherRadius;
+        
+        if (oDist < minDist) {
+            const overlap = minDist - oDist;
+            const force = (overlap / minDist) * 600;
+            vx -= (ox / oDist) * force;  // 沿分离方向减去速度
+            vy -= (oy / oDist) * force;
+        }
+    }
+    
+    // 4. 应用合速度
+    this.node.setPosition(pos.x + vx * dt, pos.y + vy * dt, pos.z);
+}
+```
+
+#### 设计要点
+
+1. **速度驱动**：使用 `vx/vy` 速度向量，而非直接修改位置，便于多力叠加
+2. **软碰撞**：排斥力与重叠深度成正比 `(overlap / minDist)`，避免生硬弹开
+3. **力叠加**：基础移速 + 排斥力 = 合速度，自然流畅
+4. **解耦通信**：通过 `EventBus.emit('QUERY_PLAYER_POSITION')` 获取玩家位置，零直接引用
+5. **麻痹状态**：`isStunned` 时直接 `return`，跳过移动逻辑
+
+---
+
+### 9.3 移动系统对比
+
+| 特性 | 玩家（PlayerController） | 敌人（EnemyStatusComponent） |
+|------|-------------------------|---------------------------|
+| 驱动方式 | 事件驱动（触摸事件） | AI 驱动（朝向玩家） |
+| 位置更新 | `setPosition(clamp(nextPos))` | `setPosition(pos + v * dt)` |
+| 平滑处理 | lerp 插值（`moveSmoothing`） | 无（直接速度应用） |
+| 碰撞处理 | 边界钳制（限制在屏幕内） | 软碰撞排斥（敌人之间不重叠） |
+| 坐标获取 | `convertToNodeSpaceAR` | 直接读取 `node.position` |
+| 目标来源 | 手指触摸位置 | EventBus 查询玩家位置 |
+
+---
+
+## 10. 分辨率适配：拖拽偏移的多次修复踩坑记录
+
+> 完整记录修复 "不同分辨率下角色拖拽偏移" 时三次失败的经过，以及最终正确方案。
+
+### 10.1 问题本质
+
+| 坐标系 | 原点 | 单位 | 获取方式 |
+|--------|------|------|----------|
+| **屏幕坐标** | 屏幕左上角 | 物理像素 | `event.getLocation()` |
+| **UI 坐标** | Canvas 左上角 | 设计分辨率像素 | `event.getUILocation()` |
+| **Canvas 局部坐标** | Canvas 中心 | 设计分辨率像素 | `node.position` |
+| **世界坐标** | 场景原点 | 世界单位 | `cam.node.worldPosition` |
+
+当实际屏幕分辨率 ≠ 设计分辨率时，Canvas 会发生缩放。例如：
+- 设计分辨率 1280×720，实际屏幕 2560×1440
+- Canvas 的 `scale` 变为 2.0
+- 触摸屏幕中心：`getUILocation()` 返回 `(1280, 720)`（设计分辨率像素）
+- 但 Player 的局部坐标应该是 `(0, 0)`（不受屏幕分辨率影响）
+
+**核心矛盾**：`getUILocation()` 返回的是**设计分辨率尺度**的坐标，但当 Canvas 缩放 ≠ 1 时，这个坐标和 `node.position` 的数值尺度不匹配。
+
+---
+
+### 10.2 失败方案一：Camera.screenToWorld 直接转换
+
+**代码**：
+```typescript
+// ❌ 错误：用 getUILocation() 作为 screenToWorld 的输入
+const uiPos = event.getUILocation();
+const worldPos = new Vec3();
+camera.screenToWorld(new Vec3(uiPos.x, uiPos.y, 0), worldPos);
+```
+
+**失败原因**：
+1. `screenToWorld()` 需要**屏幕坐标**（`getLocation()`），但传入了 **UI 坐标**（`getUILocation()`）
+2. 两者在分辨率 ≠ 设计分辨率时数值完全不同
+3. 结果：角色完全不响应拖拽
+
+---
+
+### 10.3 失败方案二：手动计算 + Y轴翻转 + Canvas偏移
+
+**代码**：
+```typescript
+// ❌ 错误：手动翻转Y轴并加上Canvas世界偏移
+private _uiToCanvas(uiPos) {
+    const canvasWorld = canvasNode.worldPosition; // (640, 360)
+    return new Vec3(
+        canvasWorld.x + (uiPos.x - designSize.width / 2),  // 加了偏移
+        canvasWorld.y + (designSize.height / 2 - uiPos.y), // Y轴翻转
+        0,
+    );
+}
+```
+
+**失败原因**：
+1. **Y轴不需要翻转**：`getUILocation()` 的 Y 已经是相对于 Canvas 左上角，`uiPos.y - designSize.height/2` 已经是正确的 Canvas 局部坐标
+2. **Canvas 世界偏移导致尺度错误**：Player 的 `node.position` 是 Canvas **局部坐标**，但 `canvasWorld` 是**世界坐标**，两者数值尺度不同
+3. **边界中心点错误**：Camera 在 `(0, 0)`，Canvas 在 `(640, 360)`，Player 初始位置 `(0, 0)` 被误判为在边界边缘
+
+**结果**：角色只能移动到屏幕中间，向上滑角色向下走。
+
+---
+
+### 10.4 失败方案三：convertToNodeSpaceAR 传入 UI 坐标
+
+**代码**：
+```typescript
+// ❌ 错误：convertToNodeSpaceAR 需要世界坐标，但传入了 UI 坐标
+const touchPos = event.getUILocation();
+uiTransform.convertToNodeSpaceAR(new Vec3(touchPos.x, touchPos.y, 0), outPos);
+```
+
+**失败原因**：
+`convertToNodeSpaceAR` 的参数必须是**世界坐标**，但 `getUILocation()` 返回的是**UI 空间坐标**（设计分辨率像素）。当 Canvas 缩放 ≠ 1 时，两者尺度不匹配，导致偏移。
+
+---
+
+### 10.5 正确方案：两步转换（屏幕 → 世界 → 局部）
+
+**核心思路**：不混用坐标系，每一步只负责一种转换，完全依赖 Cocos 官方 API。
+
+```typescript
+private _uiToParentSpace(event: EventTouch): Vec3 {
+    // Step 1: 屏幕坐标 → 世界坐标
+    const screenPos = event.getLocation(); // 屏幕像素坐标
+    const worldPos = new Vec3();
+    this._camera.screenToWorld(
+        new Vec3(screenPos.x, screenPos.y, 0),
+        worldPos
+    );
+    
+    // Step 2: 世界坐标 → 父节点局部坐标
+    const localPos = new Vec3();
+    this._parentUITransform.convertToNodeSpaceAR(worldPos, localPos);
+    
+    return localPos;
+}
+```
+
+**为什么正确**：
+1. `getLocation()` 返回**屏幕像素坐标**，正是 `screenToWorld()` 需要的输入
+2. `screenToWorld()` 输出**世界坐标**，正是 `convertToNodeSpaceAR()` 需要的输入
+3. `convertToNodeSpaceAR()` 输出**父节点局部坐标**，正是 `node.position` 的坐标系
+4. 全程不手动做加减乘除，Cocos API 自动处理所有缩放和坐标系转换
+
+**边界限制同步修正**：
+```typescript
+// 相机世界边界 → 父节点局部边界
+const camWorldPos = new Vec3(cam.node.worldPosition.x, cam.node.worldPosition.y, 0);
+const camLocalPos = new Vec3();
+this._parentUITransform.node.inverseTransformPoint(camLocalPos, camWorldPos);
+
+// 半宽高根据父节点缩放调整
+const parentScale = this._parentUITransform.node.scale;
+const finalHalfW = halfW / Math.abs(parentScale.x);
+const finalHalfH = halfH / Math.abs(parentScale.y);
+```
+
+---
+
+### 10.6 经验教训
+
+1. **API 参数类型必须严格匹配**：`screenToWorld` 要屏幕坐标，`convertToNodeSpaceAR` 要世界坐标
+2. **不要手动做坐标转换**：Cocos 的坐标系转换涉及缩放、锚点、位移，手动计算极易出错
+3. **原始代码的 `_uiToCanvas` 在设计分辨率下是对的**：问题只在分辨率变化时暴露
+4. **调试时先看坐标数值**：打印 `screenPos`、`worldPos`、`localPos` 的数值，确认尺度和方向
+5. **最小改动原则**：不要一遇到问题就重写核心逻辑
+
+---
+
+---
+
+## 11. 成功修复：分辨率自适应下的拖拽偏移
+
+### 11.1 最终方案
+
+在保留原始 `_uiToCanvas` 思路的前提下，将尺寸来源从 `uiTransform.contentSize` 替换为 `view.getDesignResolutionSize()`。
+
+```typescript
+import { view } from 'cc';
+
+private _uiToCanvas(uiPos: { x: number; y: number }): Vec3 {
+    // getUILocation 始终返回设计分辨率尺度坐标；
+    // 但 uiTransform.contentSize 会被 Canvas 的 Widget 拉伸为实际屏幕尺寸，
+    // 两者尺度不一致就会导致边缘偏移。因此使用 view.getDesignResolutionSize()。
+    const designSize = view.getDesignResolutionSize();
+    return new Vec3(
+        uiPos.x - designSize.width / 2,
+        uiPos.y - designSize.height / 2,
+        0,
+    );
+}
+```
+
+### 11.2 为什么这个方案可行
+
+| 特性 | `uiTransform.contentSize` | `view.getDesignResolutionSize()` |
+|------|---------------------------|----------------------------------|
+| 值 | 实际屏幕像素尺寸 | 设计分辨率（如 720×1280） |
+| 变化 | 随窗口缩放动态变化 | 固定不变 |
+| `getUILocation()` 尺度 | 一致 | 一致 |
+
+- `getUILocation()` 返回的坐标始终基于**设计分辨率**；
+- `view.getDesignResolutionSize()` 返回的也是**设计分辨率**；
+- 两者尺度完全一致，因此中心点偏移计算 `(uiPos - designSize/2)` 在任何分辨率下都准确。
+
+### 11.3 为什么之前失败的方案都更复杂
+
+所有之前失败的方案都在试图引入 `screenToWorld()` / `convertToNodeSpaceAR()` 做两阶段坐标转换，但因为：
+- 不理解 `getUILocation()` 的坐标尺度；
+- 误传了 UI 坐标给需要屏幕坐标的 API；
+- 引入了额外的世界坐标/局部坐标/锚点偏移问题；
+- 反而让简单的减法问题变得复杂且易错。
+
+### 11.4 核心教训
+
+1. **先确认坐标尺度再动手**：`getUILocation()` 不是屏幕像素坐标，也不是世界坐标，它是**设计分辨率尺度的 UI 坐标**。
+2. **匹配 API 的尺度预期**：`view.getDesignResolutionSize()` 与 `getUILocation()` 天然匹配。
+3. **Widget 会改变节点尺寸**：Canvas 上的 Widget 会拉伸 `contentSize`，使其不再等于设计分辨率，这是偏移的根源。
+4. **简单方案往往最可靠**：保留原始的中心点偏移思路，只修复数据来源，比重写坐标转换链更安全。
+
+---
+
+*文档版本：2026-07-07*
 *适用引擎：Cocos Creator 3.8.6*
 *项目：Element Overload（2D 像素割草肉鸽）*
