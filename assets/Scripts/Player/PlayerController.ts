@@ -9,7 +9,7 @@
  * - 不挂载 Cocos update，由 GameLoop 调用 tick(dt)
  */
 
-import { _decorator, Component, Vec3, input, Input, EventTouch, screen, Canvas, UITransform, view } from 'cc';
+import { _decorator, Component, Vec3, input, Input, EventTouch, screen, Canvas, view, Camera } from 'cc';
 
 const { ccclass, property } = _decorator;
 
@@ -31,21 +31,45 @@ export class PlayerController extends Component {
     private _targetPosition: Vec3 = new Vec3(0, 0, 0);
     private _isDragging: boolean = false;
     private _dragOffset: Vec3 = new Vec3(0, 0, 0);
+    private _camera: Camera | null = null;
+
+    private _initCamera(): void {
+        const canvas = this.node.scene?.getChildByName('Canvas')?.getComponent(Canvas);
+        this._camera = canvas?.cameraComponent ?? null;
+    }
 
     /**
-     * 将 UI 触摸坐标（getUILocation）转换为 Canvas 局部坐标
-     * Canvas 局部坐标系以 Canvas 中心为原点，与 node.position 一致
+     * 将 UI 触摸坐标（getUILocation）转换为世界坐标
+     * 关键修正：使用相机实际可视范围做线性映射，而非假设设计分辨率=世界坐标
      */
-    private _uiToCanvas(uiPos: { x: number; y: number }): Vec3 {
-        // getUILocation 始终返回设计分辨率尺度坐标；
-        // 但 uiTransform.contentSize 会被 Canvas 的 Widget 拉伸为实际屏幕尺寸，
-        // 两者尺度不一致就会导致边缘偏移。因此使用 view.getDesignResolutionSize()。
+    private _uiToWorld(uiPos: { x: number; y: number }): Vec3 {
+        if (!this._camera) {
+            this._initCamera();
+        }
+
         const designSize = view.getDesignResolutionSize();
-        return new Vec3(
-            uiPos.x - designSize.width / 2,
-            uiPos.y - designSize.height / 2,
-            0,
-        );
+
+        // 如果拿不到相机，回退到设计分辨率中心对齐（适配策略固定时可用）
+        if (!this._camera) {
+            return new Vec3(
+                uiPos.x - designSize.width / 2,
+                uiPos.y - designSize.height / 2,
+                0,
+            );
+        }
+
+        // 相机实际可视半高
+        const halfH = this._camera.orthoHeight;
+        // 根据当前窗口宽高比计算可视半宽
+        const winSize = screen.windowSize;
+        const halfW = halfH * (winSize.width / winSize.height);
+
+        // uiPos 范围是 (0,0) ~ (designWidth, designHeight)
+        // 映射到世界坐标 (-halfW, -halfH) ~ (halfW, halfH)
+        const x = (uiPos.x / designSize.width - 0.5) * (halfW * 2);
+        const y = (uiPos.y / designSize.height - 0.5) * (halfH * 2);
+
+        return new Vec3(x, y, 0);
     }
 
     /**
@@ -115,13 +139,32 @@ export class PlayerController extends Component {
 
     // ── 触摸事件：绝对跟随（保持按下时的相对偏移） ──
 
+    /**
+     * 将屏幕触摸坐标（getLocation，左下角原点，像素单位）转换为世界坐标
+     * 关键：screenPos 与 screen.windowSize 同属屏幕像素坐标系，可直接线性映射
+     */
+    private _screenToWorld(screenPos: { x: number; y: number }): Vec3 {
+        if (!this._camera) {
+            this._initCamera();
+        }
+        const winSize = screen.windowSize;
+        if (!this._camera || winSize.width <= 0 || winSize.height <= 0) {
+            return new Vec3(0, 0, 0);
+        }
+        const halfH = this._camera.orthoHeight;
+        const halfW = halfH * (winSize.width / winSize.height);
+        const x = (screenPos.x / winSize.width - 0.5) * (halfW * 2);
+        const y = (screenPos.y / winSize.height - 0.5) * (halfH * 2);
+        return new Vec3(x, y, 0);
+    }
+
     private _onTouchStart(event: EventTouch): void {
-        const canvasPos = this._uiToCanvas(event.getUILocation());
+        const worldPos = this._screenToWorld(event.getLocation());
         this._isDragging = true;
 
-        // 记录手指与角色的偏移（在同一坐标系 Canvas 局部坐标中计算）
+        // 记录手指与角色的偏移（在世界坐标系中计算）
         const pos = this.node.position;
-        this._dragOffset.set(pos.x - canvasPos.x, pos.y - canvasPos.y, 0);
+        this._dragOffset.set(pos.x - worldPos.x, pos.y - worldPos.y, 0);
 
         // 首次按下目标位置即当前角色位置（已钳制）
         this._targetPosition = this._clampPosition(new Vec3(pos.x, pos.y, 0));
@@ -130,10 +173,10 @@ export class PlayerController extends Component {
     private _onTouchMove(event: EventTouch): void {
         if (!this._isDragging) return;
 
-        const canvasPos = this._uiToCanvas(event.getUILocation());
+        const worldPos = this._screenToWorld(event.getLocation());
         const rawTarget = new Vec3(
-            canvasPos.x + this._dragOffset.x,
-            canvasPos.y + this._dragOffset.y,
+            worldPos.x + this._dragOffset.x,
+            worldPos.y + this._dragOffset.y,
             0,
         );
         // 限制目标位置不超出世界边界

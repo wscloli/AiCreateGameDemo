@@ -16,6 +16,8 @@
 - [6. 边界限制：分辨率切换后出界](#6-边界限制分辨率切换后出界)
 - [7. 对象池：节点层级决定可见性](#7-对象池节点层级决定可见性)
 - [8. 性能优化：已落实的决策](#8-性能优化已落实的决策)
+- [9. 移动系统实现详解](#9-移动系统实现详解)
+- [10. 分辨率适配：拖拽偏移的多次修复踩坑记录](#10-分辨率适配拖拽偏移的多次修复踩坑记录)
 
 ---
 
@@ -387,7 +389,7 @@ if (gameRoot && gameRoot.parent !== canvas) {
 | 子弹看不见 | `WeaponSystem.tick()` 是否被 GameLoop 调用 | `BaseBullet.init()` 是否执行 |
 | 子弹一闪即逝 | `lifetime` 是否累加 | `_checkHit()` 是否排除自身 |
 | VFX 报错 | EventBus 是否 `.call(target)` | VFXManager 是否挂载在 Canvas 下 |
-| 拖拽偏移 | `_uiToCanvas()` 转换是否正确 | `_dragOffset` 计算坐标系是否一致 |
+| 拖拽偏移 | `_screenToWorld()` 是否用 `getLocation()` | 是否混用 `getUILocation()` 与 `screen.windowSize` |
 | 角色出界 | 边界是否动态读取相机 | `clampPosition` 是否在所有位置更新处调用 |
 | 敌人重叠 | 排斥力公式是否正确 | 遍历范围是否包含所有活跃敌人 |
 | 节点不可见 | parent 是否在 Canvas 下 | `layer` 是否设为 `UI_2D` |
@@ -700,11 +702,135 @@ const finalHalfH = halfH / Math.abs(parentScale.y);
 
 ---
 
+### 10.7 失败方案四（浏览器环境）：Camera.screenToWorld + getUILocation
+
+> 在 Cocos Creator 内置预览器里工作正常后，用浏览器打开预览（窗口可自由缩放）发现拖拽偏移极大。本节记录浏览器环境下的踩坑经过。
+
+#### 问题复现
+
+- **引擎预览器**：窗口固定且通常等于设计分辨率，旧的 `_uiToCanvas`（`getUILocation - designSize/2`）工作正常。
+- **浏览器预览**：窗口大小任意变化，例如 1920×1080、1366×768、移动端竖屏等。
+- **现象**：窗口越大，角色位置越偏离手指；严重时角色卡在角落无法移动。
+
+#### 失败原因：screenToWorld 误传 UI 坐标
+
+**思路**：直接用官方 API 把触摸坐标转成世界坐标，不再手动做减法。
+
+```typescript
+// ❌ 错误代码
+private _screenToWorld(event: EventTouch): Vec3 {
+    const uiPos = event.getUILocation(); // UI 坐标（设计分辨率尺度）
+    const worldPos = new Vec3();
+    this._camera.screenToWorld(new Vec3(uiPos.x, uiPos.y, 0), worldPos);
+    return worldPos;
+}
+```
+
+**失败原因**：
+- `screenToWorld()` 需要 **屏幕像素坐标**（`getLocation()`），但传入了 **UI 坐标**（`getUILocation()`）。
+- 浏览器窗口 1920×1080 时，`getLocation()` 返回 `(960, 540)`，而 `getUILocation()` 返回 `(640, 360)`（假设设计分辨率 1280×720）。
+- API 内部把 UI 坐标当成屏幕像素去计算，结果世界坐标完全错误。
+
+**结果**：角色完全不响应拖拽，仿佛触摸事件被吞掉。
+
 ---
 
-## 11. 成功修复：分辨率自适应下的拖拽偏移
+### 10.8 失败方案五（浏览器环境）：手动映射 UI 坐标 → 世界坐标（混用坐标系）
 
-### 11.1 最终方案
+**思路**：既然 `getUILocation()` 是设计分辨率尺度，就手动把它映射到世界坐标，公式和相机可视范围对齐。
+
+```typescript
+// ❌ 错误代码
+private _uiToWorld(uiPos: { x: number; y: number }): Vec3 {
+    const designSize = view.getDesignResolutionSize(); // 设计分辨率
+    const halfH = this._camera.orthoHeight;
+    const winSize = screen.windowSize; // ← 屏幕像素
+    const halfW = halfH * (winSize.width / winSize.height); // ← 屏幕宽高比
+    // 用设计分辨率的坐标 去 映射基于屏幕宽高比计算出的世界边界
+    const x = (uiPos.x / designSize.width - 0.5) * (halfW * 2);
+    const y = (uiPos.y / designSize.height - 0.5) * (halfH * 2);
+    return new Vec3(x, y, 0);
+}
+```
+
+**失败原因**：
+- **混用了两个坐标系**：`uiPos` 是设计分辨率尺度（固定 1280×720），但 `halfW` 是用 **屏幕像素宽高比** 算出来的。
+- 当浏览器窗口被缩放到非设计分辨率比例时，`designSize.width/height` 与 `winSize.width/height` 的比例不一致。
+- 例如设计分辨率 1280×720（16:9），浏览器窗口缩成 1000×1000（1:1）：
+  - `halfW = 360 * (1000/1000) = 360`
+  - 但 `uiPos.x` 的范围仍是 0~1280，导致映射后的世界坐标被过度拉伸。
+
+**结果**：角色不能移动，或只在极小范围内抽搐。
+
+---
+
+### 10.9 最终正确方案（浏览器环境）：屏幕像素坐标直接映射世界坐标
+
+**思路**：放弃 UI 坐标，全程使用 **屏幕像素坐标**（`getLocation()`），并与 `screen.windowSize` 做同一坐标系的线性映射。
+
+```typescript
+// ✅ 正确代码
+private _screenToWorld(screenPos: { x: number; y: number }): Vec3 {
+    if (!this._camera) {
+        this._initCamera();
+    }
+    const winSize = screen.windowSize;
+    if (!this._camera || winSize.width <= 0 || winSize.height <= 0) {
+        return new Vec3(0, 0, 0);
+    }
+    const halfH = this._camera.orthoHeight;
+    const halfW = halfH * (winSize.width / winSize.height);
+    const x = (screenPos.x / winSize.width - 0.5) * (halfW * 2);
+    const y = (screenPos.y / winSize.height - 0.5) * (halfH * 2);
+    return new Vec3(x, y, 0);
+}
+
+// 触摸事件中使用 getLocation（屏幕像素坐标）
+private _onTouchStart(event: EventTouch): void {
+    const worldPos = this._screenToWorld(event.getLocation());
+    // ... 记录 dragOffset
+}
+
+private _onTouchMove(event: EventTouch): void {
+    const worldPos = this._screenToWorld(event.getLocation());
+    // ... 更新 targetPosition
+}
+```
+
+**为什么正确**：
+1. `event.getLocation()` 和 `screen.windowSize` 同属 **屏幕像素坐标系**，比例恒定。
+2. `(screenPos / winSize - 0.5)` 把屏幕坐标归一化到 `[-0.5, 0.5]`。
+3. 乘以 `(halfW * 2)` / `(halfH * 2)` 映射到相机实际世界边界。
+4. 全程不涉及设计分辨率、Canvas 缩放、UI 坐标转换，不受浏览器窗口大小变化影响。
+
+---
+
+### 10.10 方案汇总与核心教训
+
+| 方案 | 适用环境 | 输入坐标 | 计算半宽的依据 | 结果 |
+|------|----------|----------|----------------|------|
+| 10.2 | 引擎预览器 | `getUILocation()`（UI 坐标） | 未计算，直接 API | ❌ 角色不移动 |
+| 10.3 | 引擎预览器 | `getUILocation()`（UI 坐标） | 手动 + Canvas 偏移 | ❌ 偏移+反向 |
+| 10.4 | 引擎预览器 | `getUILocation()`（UI 坐标） | `convertToNodeSpaceAR` | ❌ 偏移 |
+| 10.5 | 引擎预览器 | `getLocation()`（屏幕像素） | `screenToWorld` + API | ✅ 引擎预览器正常 |
+| 10.7 | 浏览器 | `getUILocation()`（UI 坐标） | 未计算，直接 API | ❌ 角色不移动 |
+| 10.8 | 浏览器 | `getUILocation()`（UI 坐标） | `screen.windowSize`（屏幕像素） | ❌ 混用坐标系 |
+| **10.9** | **浏览器** | **`getLocation()`（屏幕像素）** | **`screen.windowSize`（屏幕像素）** | ✅ **任意窗口精准跟随** |
+
+**核心教训**：
+1. **`getUILocation()` 与 `screen.windowSize` 绝不可混用**：前者是设计分辨率尺度，后者是物理像素尺度。
+2. **Cocos 的 `screenToWorld` 要吃屏幕坐标**：不要传 UI 坐标给它。
+3. **浏览器预览和引擎预览器是两种环境**：引擎预览器窗口通常等于设计分辨率，会掩盖坐标混用的问题；必须在浏览器中测试各种分辨率。
+4. **当同一坐标系内有比例关系时，线性映射是最可靠的**：`screenPos / screenSize → [-0.5, 0.5] → worldBounds` 没有歧义。
+5. **引擎预览器正常的方案不代表浏览器正常**：`view.getDesignResolutionSize()` 配合 `getUILocation()` 在引擎预览器里完美工作，但在浏览器自由缩放下失效。
+
+---
+
+## 11. 引擎预览器限定方案：view.getDesignResolutionSize
+
+> ⚠️ **注意**：此方案仅在 Cocos Creator 内置预览器（窗口固定等于设计分辨率）下有效，**在浏览器自由缩放下会失效**。仅作记录，生产环境请使用 [10.9](#109-最终正确方案浏览器环境屏幕像素坐标直接映射世界坐标)。
+
+### 11.1 方案代码
 
 在保留原始 `_uiToCanvas` 思路的前提下，将尺寸来源从 `uiTransform.contentSize` 替换为 `view.getDesignResolutionSize()`。
 
@@ -712,9 +838,6 @@ const finalHalfH = halfH / Math.abs(parentScale.y);
 import { view } from 'cc';
 
 private _uiToCanvas(uiPos: { x: number; y: number }): Vec3 {
-    // getUILocation 始终返回设计分辨率尺度坐标；
-    // 但 uiTransform.contentSize 会被 Canvas 的 Widget 拉伸为实际屏幕尺寸，
-    // 两者尺度不一致就会导致边缘偏移。因此使用 view.getDesignResolutionSize()。
     const designSize = view.getDesignResolutionSize();
     return new Vec3(
         uiPos.x - designSize.width / 2,
@@ -724,32 +847,15 @@ private _uiToCanvas(uiPos: { x: number; y: number }): Vec3 {
 }
 ```
 
-### 11.2 为什么这个方案可行
-
-| 特性 | `uiTransform.contentSize` | `view.getDesignResolutionSize()` |
-|------|---------------------------|----------------------------------|
-| 值 | 实际屏幕像素尺寸 | 设计分辨率（如 720×1280） |
-| 变化 | 随窗口缩放动态变化 | 固定不变 |
-| `getUILocation()` 尺度 | 一致 | 一致 |
+### 11.2 为什么引擎预览器里可行
 
 - `getUILocation()` 返回的坐标始终基于**设计分辨率**；
 - `view.getDesignResolutionSize()` 返回的也是**设计分辨率**；
-- 两者尺度完全一致，因此中心点偏移计算 `(uiPos - designSize/2)` 在任何分辨率下都准确。
+- 两者尺度完全一致，因此中心点偏移计算 `(uiPos - designSize/2)` 在引擎预览器里准确。
 
-### 11.3 为什么之前失败的方案都更复杂
+### 11.3 为什么浏览器里失效
 
-所有之前失败的方案都在试图引入 `screenToWorld()` / `convertToNodeSpaceAR()` 做两阶段坐标转换，但因为：
-- 不理解 `getUILocation()` 的坐标尺度；
-- 误传了 UI 坐标给需要屏幕坐标的 API；
-- 引入了额外的世界坐标/局部坐标/锚点偏移问题；
-- 反而让简单的减法问题变得复杂且易错。
-
-### 11.4 核心教训
-
-1. **先确认坐标尺度再动手**：`getUILocation()` 不是屏幕像素坐标，也不是世界坐标，它是**设计分辨率尺度的 UI 坐标**。
-2. **匹配 API 的尺度预期**：`view.getDesignResolutionSize()` 与 `getUILocation()` 天然匹配。
-3. **Widget 会改变节点尺寸**：Canvas 上的 Widget 会拉伸 `contentSize`，使其不再等于设计分辨率，这是偏移的根源。
-4. **简单方案往往最可靠**：保留原始的中心点偏移思路，只修复数据来源，比重写坐标转换链更安全。
+当浏览器窗口大小 ≠ 设计分辨率时，Canvas 的适配策略会改变 UI 坐标到屏幕坐标的映射关系，但 `view.getDesignResolutionSize()` 仍是固定值，导致 `getUILocation()` 的实际坐标尺度与预期不符。
 
 ---
 
