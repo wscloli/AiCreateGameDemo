@@ -23,6 +23,7 @@ import { GameLoop } from './GameLoop';
 import { EnemyManager } from '../Enemy/EnemyManager';
 import { ReactionProcessor } from '../Enemy/ReactionProcessor';
 import { BulletFactory } from '../Player/BulletFactory';
+import { RoguelikeRewardSystem } from '../Player/RoguelikeRewardSystem';
 
 const { ccclass, property } = _decorator;
 
@@ -162,6 +163,11 @@ export class GameManager extends Component {
             this.node.addComponent(ReactionProcessor);
         }
         console.log('  ✓ ReactionProcessor');
+
+        if (!this.node.getComponent(RoguelikeRewardSystem)) {
+            this.node.addComponent(RoguelikeRewardSystem);
+        }
+        console.log('  ✓ RoguelikeRewardSystem');
 
         console.log('[GameManager] 所有核心系统初始化完成');
     }
@@ -310,6 +316,7 @@ export class GameManager extends Component {
         PoolManager.clearAll();
         ElementReactionHub.reset();
         ElementReactionHub.init();
+        RoguelikeRewardSystem.reset();
 
         this._quadtree = new Quadtree(this.worldWidth, this.worldHeight, this.quadtreeMaxEntities, this.quadtreeMaxDepth);
         BulletFactory.init(this._quadtree);

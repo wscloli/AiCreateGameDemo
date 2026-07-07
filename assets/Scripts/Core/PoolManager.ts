@@ -12,6 +12,16 @@
 
 import { _decorator, Component, Node, instantiate, Prefab } from 'cc';
 
+/** 对象池注册选项 */
+export interface PoolRegisterOptions<T extends Component> {
+    componentClass: new () => T;
+    prewarmCount?: number;
+    /** 可选：预制体资源（优先于 templateNode） */
+    prefab?: Prefab | null;
+    /** 可选：运行时模板节点 */
+    templateNode?: Node | null;
+}
+
 const { ccclass } = _decorator;
 
 /** 对象池单池 */
@@ -19,6 +29,7 @@ class ObjectPool<T extends Component> {
     private _pool: T[] = [];
     private _active: Set<T> = new Set();
     private _prefab: Prefab | null = null;
+    private _templateNode: Node | null = null;
     private _componentClass: new () => T;
     private _nodeParent: Node;
 
@@ -26,10 +37,12 @@ class ObjectPool<T extends Component> {
         componentClass: new () => T,
         nodeParent: Node,
         prefab: Prefab | null = null,
+        templateNode: Node | null = null,
     ) {
         this._componentClass = componentClass;
         this._nodeParent = nodeParent;
         this._prefab = prefab;
+        this._templateNode = templateNode;
     }
 
     /**
@@ -103,6 +116,13 @@ class ObjectPool<T extends Component> {
     }
 
     /**
+     * 运行时设置模板节点（池已注册后也可调用）
+     */
+    public setTemplateNode(node: Node): void {
+        this._templateNode = node;
+    }
+
+    /**
      * 创建新实例
      */
     private _createInstance(): T {
@@ -110,6 +130,8 @@ class ObjectPool<T extends Component> {
 
         if (this._prefab) {
             node = instantiate(this._prefab);
+        } else if (this._templateNode) {
+            node = instantiate(this._templateNode);
         } else {
             node = new Node();
         }
@@ -153,17 +175,44 @@ export class PoolManager extends Component {
     }
 
     /**
-     * 注册一个对象池
-     *
-     * @param componentClass  组件类（如 BaseBullet）
-     * @param prewarmCount    预生成数量
-     * @param prefab          可选预制体
+     * 注册一个对象池（兼容旧签名：componentClass, prewarmCount, prefab?）
      */
     public static registerPool<T extends Component>(
         componentClass: new () => T,
-        prewarmCount: number = 0,
-        prefab: Prefab | null = null,
+        prewarmCount?: number,
+        prefab?: Prefab | null,
+    ): void;
+
+    /**
+     * 注册一个对象池（新签名：通过 options 传入模板节点）
+     */
+    public static registerPool<T extends Component>(
+        options: PoolRegisterOptions<T>,
+    ): void;
+
+    public static registerPool(
+        arg1: any,
+        arg2?: number,
+        arg3?: Prefab | null,
     ): void {
+        let componentClass: new () => Component;
+        let prewarmCount = 0;
+        let prefab: Prefab | null = null;
+        let templateNode: Node | null = null;
+
+        if (typeof arg1 === 'function') {
+            // 旧签名
+            componentClass = arg1;
+            prewarmCount = arg2 ?? 0;
+            prefab = arg3 ?? null;
+        } else {
+            // 新签名
+            componentClass = arg1.componentClass;
+            prewarmCount = arg1.prewarmCount ?? 0;
+            prefab = arg1.prefab ?? null;
+            templateNode = arg1.templateNode ?? null;
+        }
+
         const className = componentClass.name;
 
         if (PoolManager._pools.has(className)) {
@@ -176,7 +225,12 @@ export class PoolManager extends Component {
             return;
         }
 
-        const pool = new ObjectPool<T>(componentClass, PoolManager._instance.node, prefab);
+        const pool = new ObjectPool(
+            componentClass,
+            PoolManager._instance.node,
+            prefab,
+            templateNode,
+        );
         PoolManager._pools.set(className, pool);
 
         if (prewarmCount > 0) {
@@ -244,6 +298,35 @@ export class PoolManager extends Component {
         const className = componentClass.name;
         const pool = PoolManager._pools.get(className);
         return pool ? pool.getActiveList() : [];
+    }
+
+    /**
+     * 为已注册的池预生成指定数量的实例
+     */
+    public static prewarm<T extends Component>(componentClass: new () => T, count: number): void {
+        const className = componentClass.name;
+        const pool = PoolManager._pools.get(className);
+        if (!pool) {
+            console.warn(`[PoolManager] 池 "${className}" 不存在，无法预生成`);
+            return;
+        }
+        pool.prewarm(count);
+    }
+
+    /**
+     * 为已注册的池设置运行时模板节点
+     */
+    public static setTemplateNode<T extends Component>(
+        componentClass: new () => T,
+        node: Node,
+    ): void {
+        const className = componentClass.name;
+        const pool = PoolManager._pools.get(className);
+        if (!pool) {
+            console.warn(`[PoolManager] 池 "${className}" 不存在，无法设置模板节点`);
+            return;
+        }
+        pool.setTemplateNode(node);
     }
 
     /**

@@ -11,6 +11,7 @@ import { PlayerController } from '../Player/PlayerController';
 import { WeaponSystem } from '../Player/WeaponSystem';
 import { EventBus } from './EventBus';
 import { VFXManager } from './VFXManager';
+import { EnvironmentManager } from './EnvironmentManager';
 import { BaseBullet } from '../Bullets/BaseBullet';
 import { OilBullet } from '../Bullets/OilBullet';
 import { FireBullet } from '../Bullets/FireBullet';
@@ -45,6 +46,7 @@ export class GameLoop extends Component {
     private _weaponSystem: WeaponSystem | null = null;
     private _gameManager: GameManager | null = null;
     private _isRunning: boolean = false;
+    private _isPaused: boolean = false;
     private _playerResolved: boolean = false;
     private _vfxManager: VFXManager | null = null;
 
@@ -53,16 +55,30 @@ export class GameLoop extends Component {
     protected onLoad(): void {
         this._gameManager = this.node.getComponent(GameManager);
         EventBus.on('QUERY_PLAYER_POSITION', this._onQueryPlayerPosition, this);
+        EventBus.on('GAME_PAUSE', this._onGamePause, this);
+        EventBus.on('GAME_RESUME', this._onGameResume, this);
     }
 
     protected onDestroy(): void {
         EventBus.off('QUERY_PLAYER_POSITION', this._onQueryPlayerPosition, this);
+        EventBus.off('GAME_PAUSE', this._onGamePause, this);
+        EventBus.off('GAME_RESUME', this._onGameResume, this);
     }
 
     private _onQueryPlayerPosition(callback: (pos: Vec3) => void): void {
         if (this._playerController) {
             callback(this._playerController.node.position);
         }
+    }
+
+    private _onGamePause(): void {
+        this._isPaused = true;
+        console.log('[GameLoop] 游戏暂停');
+    }
+
+    private _onGameResume(): void {
+        this._isPaused = false;
+        console.log('[GameLoop] 游戏恢复');
     }
 
     protected update(dt: number): void {
@@ -94,35 +110,38 @@ export class GameLoop extends Component {
         this._frameCount++;
         this._debugInfo.dt = safeDt;
 
-        // P1: 玩家 + 武器系统
-        this._playerController?.tick(safeDt);
-        this._weaponSystem?.tick(safeDt);
+        // 暂停时只更新视觉特效和环境区域，冻结战斗逻辑
+        if (!this._isPaused) {
+            // P1: 玩家 + 武器系统
+            this._playerController?.tick(safeDt);
+            this._weaponSystem?.tick(safeDt);
 
-        // P2: 敌人移动（先移动，让子弹看到最新位置）
-        const enemies = PoolManager.getActiveList(EnemyStatusComponent);
-        for (let i = enemies.length - 1; i >= 0; i--) {
-            enemies[i].tick(safeDt);
-        }
-
-        // P3: 重建四叉树（用敌人最新位置）
-        EnemyManager.tick(safeDt);
-        this._debugInfo.enemyCount = EnemyManager.aliveCount;
-
-        // P4: 子弹（移动 + 碰撞检测，查的是刚重建的四叉树）
-        let totalBullets = 0;
-        for (const bulletClass of BULLET_CLASSES) {
-            const bullets = PoolManager.getActiveList(bulletClass);
-            totalBullets += bullets.length;
-            for (let i = bullets.length - 1; i >= 0; i--) {
-                bullets[i].tick(safeDt);
+            // P2: 敌人移动（先移动，让子弹看到最新位置）
+            const enemies = PoolManager.getActiveList(EnemyStatusComponent);
+            for (let i = enemies.length - 1; i >= 0; i--) {
+                enemies[i].tick(safeDt);
             }
+
+            // P3: 重建四叉树（用敌人最新位置）
+            EnemyManager.tick(safeDt);
+            this._debugInfo.enemyCount = EnemyManager.aliveCount;
+
+            // P4: 子弹（移动 + 碰撞检测，查的是刚重建的四叉树）
+            let totalBullets = 0;
+            for (const bulletClass of BULLET_CLASSES) {
+                const bullets = PoolManager.getActiveList(bulletClass);
+                totalBullets += bullets.length;
+                for (let i = bullets.length - 1; i >= 0; i--) {
+                    bullets[i].tick(safeDt);
+                }
+            }
+            this._debugInfo.bulletCount = totalBullets;
+
+            // P5: 波次
+            this._gameManager?.tick(safeDt);
         }
-        this._debugInfo.bulletCount = totalBullets;
 
-        // P5: 波次
-        this._gameManager?.tick(safeDt);
-
-        // P6: 视觉特效
+        // P6: 视觉特效（始终更新，让暂停时特效不卡顿）
         if (!this._vfxManager) {
             const canvas = this.node.scene?.getChildByName('Canvas');
             if (canvas) {
@@ -130,6 +149,9 @@ export class GameLoop extends Component {
             }
         }
         this._vfxManager?.tick(safeDt);
+
+        // P7: 环境区域衰减（始终更新）
+        EnvironmentManager.tick(safeDt);
 
         if (this.enableDebugLog && this._frameCount % this.debugLogInterval === 0) {
             console.log(

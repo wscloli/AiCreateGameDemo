@@ -9,6 +9,7 @@ import { _decorator, Component, Vec3 } from 'cc';
 import { ElementType, ElementReactionHub } from '../Core/ElementReactionHub';
 import { EventBus } from '../Core/EventBus';
 import { EnemyManager } from './EnemyManager';
+import { EnvironmentManager } from '../Core/EnvironmentManager';
 
 const { ccclass } = _decorator;
 
@@ -159,12 +160,15 @@ export class EnemyStatusComponent extends Component {
         const dy = targetPos.y - pos.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
 
+        // 查询环境效果（油洼减速等）
+        const envEffect = EnvironmentManager.queryEffectAt(pos.x, pos.y);
+
         // 基础朝向玩家的速度
         let vx = 0;
         let vy = 0;
         if (dist >= 1) {
-            vx = (dx / dist) * this.moveSpeed;
-            vy = (dy / dist) * this.moveSpeed;
+            vx = (dx / dist) * this.moveSpeed * envEffect.moveSpeedMultiplier;
+            vy = (dy / dist) * this.moveSpeed * envEffect.moveSpeedMultiplier;
         }
 
         // ── 敌人互相排斥（软碰撞） ──
@@ -210,5 +214,7 @@ export class EnemyStatusComponent extends Component {
         this.scale = 1.0;
         this.isStunned = false;
         this._stunTimer = 0;
+        // 重置节点缩放（对象池复用会保留上一轮的 scale）
+        this.node.setScale(1, 1, 1);
     }
 }

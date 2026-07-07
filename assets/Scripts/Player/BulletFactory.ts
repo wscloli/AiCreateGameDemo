@@ -66,15 +66,13 @@ export class BulletFactory extends Component {
         BulletFactory._modifierRegistry.set('Boomerang', () => new BoomerangModifier());
         BulletFactory._modifierRegistry.set('Orbit', () => new OrbitModifier(80, 3.0, 0));
 
-        // 注册所有元素子弹的对象池
-        const bulletClasses = [OilBullet, FireBullet, LightningBullet, WaterBullet];
+        // 注册所有元素子弹的对象池（不预生成，模板节点由外部注入后再手动 prewarm）
+        const bulletClasses: (new () => BaseBullet)[] = [OilBullet, FireBullet, LightningBullet, WaterBullet];
         for (const cls of bulletClasses) {
-            PoolManager.registerPool(cls, 20); // 每种子弹预生成 20 个
+            PoolManager.registerPool(cls, 0);
         }
 
-        // 注册敌人状态组件池
-        PoolManager.registerPool(EnemyStatusComponent, 30);
-        console.log('[BulletFactory] 初始化完成，已注册 4 种子弹池 + EnemyStatusComponent 池');
+        console.log('[BulletFactory] 初始化完成，已注册 4 种子弹池');
     }
 
     // ────────────────────────────────

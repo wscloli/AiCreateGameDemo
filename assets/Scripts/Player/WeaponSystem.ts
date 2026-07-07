@@ -42,13 +42,22 @@ export class WeaponSystem extends Component {
     @property
     public baseDamage: number = 10;
 
+    /** 当前伤害（受修改器影响） */
+    public currentDamage: number = 10;
+
     /** 子弹基础速度 */
     @property
     public baseSpeed: number = 350;
 
+    /** 当前子弹速度（受修改器影响） */
+    public currentSpeed: number = 350;
+
     /** 子弹最大存活时间 */
     @property
     public bulletLifetime: number = 3.0;
+
+    /** 额外散射子弹数量 */
+    public extraMultishot: number = 0;
 
     /** 当前序列索引 */
     private _queueIndex: number = 0;
@@ -62,10 +71,16 @@ export class WeaponSystem extends Component {
 
     protected onLoad(): void {
         EventBus.on('MODIFIER_FIRE_RATE_CHANGED', this._onFireRateChanged, this);
+        EventBus.on('MODIFIER_DAMAGE_CHANGED', this._onDamageChanged, this);
+        EventBus.on('MODIFIER_BULLET_SPEED_CHANGED', this._onBulletSpeedChanged, this);
+        EventBus.on('MULTISHOT_CHANGED', this._onMultishotChanged, this);
     }
 
     protected onDestroy(): void {
         EventBus.off('MODIFIER_FIRE_RATE_CHANGED', this._onFireRateChanged, this);
+        EventBus.off('MODIFIER_DAMAGE_CHANGED', this._onDamageChanged, this);
+        EventBus.off('MODIFIER_BULLET_SPEED_CHANGED', this._onBulletSpeedChanged, this);
+        EventBus.off('MULTISHOT_CHANGED', this._onMultishotChanged, this);
     }
 
     // ────────────────────────────────
@@ -96,14 +111,35 @@ export class WeaponSystem extends Component {
         const direction = this._findNearestEnemyDirection();
         if (!direction) return;
 
+        // 主弹
         BulletFactory.spawnBullet({
             position: this.node.position.clone(),
             direction,
             element,
-            damage: this.baseDamage,
-            speed: this.baseSpeed,
+            damage: this.currentDamage,
+            speed: this.currentSpeed,
             maxLifetime: this.bulletLifetime,
         });
+
+        // 散射弹（如果有 multishot）
+        if (this.extraMultishot > 0) {
+            const baseAngle = Math.atan2(direction.y, direction.x);
+            const spreadStep = Math.PI / 8; // 22.5° 间隔
+            const startOffset = -((this.extraMultishot - 1) * spreadStep) / 2;
+
+            for (let i = 0; i < this.extraMultishot; i++) {
+                const angle = baseAngle + startOffset + spreadStep * i;
+                const spreadDir = new Vec2(Math.cos(angle), Math.sin(angle));
+                BulletFactory.spawnBullet({
+                    position: this.node.position.clone(),
+                    direction: spreadDir,
+                    element,
+                    damage: this.currentDamage,
+                    speed: this.currentSpeed,
+                    maxLifetime: this.bulletLifetime,
+                });
+            }
+        }
     }
 
     private _findNearestEnemyDirection(): Vec2 | null {
@@ -130,6 +166,18 @@ export class WeaponSystem extends Component {
 
     private _onFireRateChanged(multiplier: number): void {
         this.currentFireInterval = this.baseFireInterval * multiplier;
+    }
+
+    private _onDamageChanged(multiplier: number): void {
+        this.currentDamage = Math.floor(this.baseDamage * multiplier);
+    }
+
+    private _onBulletSpeedChanged(multiplier: number): void {
+        this.currentSpeed = this.baseSpeed * multiplier;
+    }
+
+    private _onMultishotChanged(payload: { extraBullets: number }): void {
+        this.extraMultishot = payload.extraBullets;
     }
 
     // ────────────────────────────────

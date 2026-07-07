@@ -17,6 +17,7 @@ import { PoolManager } from '../Core/PoolManager';
 import { Quadtree, IQuadEntity } from '../Core/Quadtree';
 import { EnemyStatusComponent } from './EnemyStatusComponent';
 import { ReactionProcessor } from './ReactionProcessor';
+import { EnvironmentManager } from '../Core/EnvironmentManager';
 
 const { ccclass, property } = _decorator;
 
@@ -94,6 +95,9 @@ export class EnemyManager extends Component {
 
     public static init(quadtree: Quadtree): void {
         EnemyManager._quadtree = quadtree;
+
+        // 注册敌人对象池（不预生成，模板节点由外部注入后再手动 prewarm）
+        PoolManager.registerPool(EnemyStatusComponent, 0);
     }
 
     // ────────────────────────────────
@@ -167,8 +171,8 @@ export class EnemyManager extends Component {
 
         const config = EnemyManager._enemyConfigs.get(payload.enemyId);
 
-        // 吸收盾检测
-        if (config?.elementResist?.includes(payload.element)) {
+        // 吸收盾检测（必须存在且非空数组）
+        if (config?.elementResist?.length && config.elementResist.indexOf(payload.element) !== -1) {
             enemy.hp = Math.min(enemy.hp + payload.damage * 0.5, enemy.maxHp);
             enemy.scale += 0.1;
             enemy.node.setScale(enemy.scale, enemy.scale, 1);
@@ -188,10 +192,26 @@ export class EnemyManager extends Component {
             }
         }
 
-        // 触发反应判定
+        // 环境区域效果查询
+        const envEffect = EnvironmentManager.queryEffectAt(enemy.position.x, enemy.position.y);
+
+        // 触发反应判定（先应用子弹元素）
         const hasReaction = enemy.applyElement(payload.element);
         if (!hasReaction) {
-            enemy.takeDamage(payload.damage);
+            // 无反应时，应用环境伤害倍率
+            const finalDamage = Math.floor(payload.damage * envEffect.damageTakenMultiplier);
+            enemy.takeDamage(finalDamage);
+        }
+
+        // 环境自动附加元素（如水池自动附水）
+        if (envEffect.autoApplyElement) {
+            // 延迟一帧附加，避免同一帧内重复反应
+            setTimeout(() => {
+                const currentEnemy = EnemyManager._enemies.get(payload.enemyId);
+                if (currentEnemy) {
+                    currentEnemy.applyElement(envEffect.autoApplyElement!);
+                }
+            }, 0);
         }
     }
 
