@@ -4,7 +4,9 @@
  * 自动武器施法队列
  *
  * 职责：
- * - 维护固定施法序列 [OIL → FIRE → LIGHTNING → WATER → 循环]
+ * - 维护动态施法序列（初始为空，肉鸽奖励逐步解锁）
+ * - 无解锁元素时发射纯物理 BasicBullet
+ * - 解锁后按选择顺序发射对应元素子弹
  * - 自动寻找最近的敌人，向该方向发射子弹
  * - 通过 BulletFactory 生成子弹
  * - 不挂载 Cocos update，由 GameLoop 调用 tick(dt)
@@ -16,14 +18,6 @@ import { EventBus } from '../Core/EventBus';
 import { BulletFactory } from './BulletFactory';
 
 const { ccclass, property } = _decorator;
-
-/** 施法序列 */
-const SPELL_QUEUE: ElementType[] = [
-    ElementType.OIL,
-    ElementType.FIRE,
-    ElementType.LIGHTNING,
-    ElementType.WATER,
-];
 
 @ccclass('WeaponSystem')
 export class WeaponSystem extends Component {
@@ -59,6 +53,9 @@ export class WeaponSystem extends Component {
     /** 额外散射子弹数量 */
     public extraMultishot: number = 0;
 
+    /** 动态施法序列（初始为空） */
+    private _spellQueue: ElementType[] = [];
+
     /** 当前序列索引 */
     private _queueIndex: number = 0;
 
@@ -74,6 +71,7 @@ export class WeaponSystem extends Component {
         EventBus.on('MODIFIER_DAMAGE_CHANGED', this._onDamageChanged, this);
         EventBus.on('MODIFIER_BULLET_SPEED_CHANGED', this._onBulletSpeedChanged, this);
         EventBus.on('MULTISHOT_CHANGED', this._onMultishotChanged, this);
+        EventBus.on('ADD_ELEMENT', this._onAddElement, this);
     }
 
     protected onDestroy(): void {
@@ -81,6 +79,7 @@ export class WeaponSystem extends Component {
         EventBus.off('MODIFIER_DAMAGE_CHANGED', this._onDamageChanged, this);
         EventBus.off('MODIFIER_BULLET_SPEED_CHANGED', this._onBulletSpeedChanged, this);
         EventBus.off('MULTISHOT_CHANGED', this._onMultishotChanged, this);
+        EventBus.off('ADD_ELEMENT', this._onAddElement, this);
     }
 
     // ────────────────────────────────
@@ -105,11 +104,15 @@ export class WeaponSystem extends Component {
     // ────────────────────────────────
 
     private _fire(): void {
-        const element = SPELL_QUEUE[this._queueIndex];
-        this._queueIndex = (this._queueIndex + 1) % SPELL_QUEUE.length;
-
         const direction = this._findNearestEnemyDirection();
         if (!direction) return;
+
+        // 确定本次发射的元素：队列为空则用 NONE（BasicBullet）
+        let element: ElementType = ElementType.NONE;
+        if (this._spellQueue.length > 0) {
+            element = this._spellQueue[this._queueIndex];
+            this._queueIndex = (this._queueIndex + 1) % this._spellQueue.length;
+        }
 
         // 主弹
         BulletFactory.spawnBullet({
@@ -164,6 +167,10 @@ export class WeaponSystem extends Component {
         return nearestDir;
     }
 
+    // ────────────────────────────────
+    //  事件回调
+    // ────────────────────────────────
+
     private _onFireRateChanged(multiplier: number): void {
         this.currentFireInterval = this.baseFireInterval * multiplier;
     }
@@ -180,19 +187,50 @@ export class WeaponSystem extends Component {
         this.extraMultishot = payload.extraBullets;
     }
 
+    private _onAddElement(payload: { element: ElementType }): void {
+        this.addElementToQueue(payload.element);
+    }
+
     // ────────────────────────────────
-    //  公开接口
+    //  公开接口（供 RoguelikeRewardSystem 调用）
     // ────────────────────────────────
 
-    public getNextElement(): ElementType {
-        return SPELL_QUEUE[this._queueIndex];
+    /**
+     * 向施法队列追加一种元素（去重）
+     */
+    public addElementToQueue(element: ElementType): void {
+        if (this._spellQueue.indexOf(element) !== -1) {
+            console.warn(`[WeaponSystem] 元素 ${element} 已存在于队列中`);
+            return;
+        }
+        this._spellQueue.push(element);
+        console.log(`[WeaponSystem] 解锁元素: ${element}，当前队列: [${this._spellQueue.join(', ')}]`);
+    }
+
+    /**
+     * 直接设置整个施法队列（覆盖，用于读档或调试）
+     */
+    public setElementQueue(elements: ElementType[]): void {
+        this._spellQueue = [...elements];
+        this._queueIndex = 0;
+        console.log(`[WeaponSystem] 施法队列已设为: [${this._spellQueue.join(', ')}]`);
+    }
+
+    public getNextElement(): ElementType | null {
+        if (this._spellQueue.length === 0) return null;
+        return this._spellQueue[this._queueIndex];
     }
 
     public getQueueIndex(): number {
         return this._queueIndex;
     }
 
+    public getQueueLength(): number {
+        return this._spellQueue.length;
+    }
+
     public resetQueue(): void {
+        this._spellQueue = [];
         this._queueIndex = 0;
     }
 }

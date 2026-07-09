@@ -1,864 +1,391 @@
-# Element Overload 项目踩坑记录
+# Element Overload — 开发规范与踩坑速查
 
-> 本文档记录 Cocos Creator 3.8.6 + TypeScript 项目开发中遇到的所有关键问题和解决方案。
-> 新项目可直接参考，避免重复踩坑。
-
----
-
-## 目录
-
-- [0. 启动黑屏：Canvas 相机未正确渲染](#0-启动黑屏canvas-相机未正确渲染)
-- [1. 渲染层：子弹/敌人完全看不见](#1-渲染层子弹敌人完全看不见)
-- [2. 事件系统：EventBus 回调丢失 this](#2-事件系统eventbus-回调丢失-this)
-- [3. GameLoop 架构：tick 驱动遗漏](#3-gameloop-架构tick-驱动遗漏)
-- [4. 物理/碰撞：子弹自毁 + 敌人重叠](#4-物理碰撞子弹自毁--敌人重叠)
-- [5. 坐标系：UI 坐标 vs Canvas 局部坐标](#5-坐标系ui-坐标-vs-canvas-局部坐标)
-- [6. 边界限制：分辨率切换后出界](#6-边界限制分辨率切换后出界)
-- [7. 对象池：节点层级决定可见性](#7-对象池节点层级决定可见性)
-- [8. 性能优化：已落实的决策](#8-性能优化已落实的决策)
-- [9. 移动系统实现详解](#9-移动系统实现详解)
-- [10. 分辨率适配：拖拽偏移的多次修复踩坑记录](#10-分辨率适配拖拽偏移的多次修复踩坑记录)
+> Cocos Creator 3.8.6 + TypeScript。AI 生成代码前必读。
 
 ---
 
-## 0. 启动黑屏：Canvas 相机未正确渲染
+## 一、架构铁律（不可违反）
 
-### 问题表现
-点击预览后整个屏幕纯黑，没有任何内容显示。
+| # | 规则 | 违反后果 |
+|---|------|---------|
+| 1 | **GameLoop 是唯一 `update()`**。所有子系统禁止挂 `update(dt)`，必须暴露 `tick(dt)` 由 GameLoop 按优先级调用 | 重复驱动、时序错乱 |
+| 2 | **禁止 `destroy/instantiate`**。统一用 `PoolManager.spawn/despawn` | 内存泄漏、GC 卡顿 |
+| 3 | **禁止 Physics2D 碰撞体**。用 `Quadtree.query + Vec2.distance` | 性能暴跌 |
+| 4 | **每个 .ts 文件只有一个 `@ccclass`** | Cocos 编译报错 |
+| 5 | **对象池取出后必须手动 reset 状态** | 状态残留导致诡异 Bug |
+| 6 | **子类禁止覆写父类核心生命周期方法**。用模板方法模式（固定骨架 + 钩子） | 框架逻辑被绕过 |
 
-### 根因分析
-Cocos Creator 3.x 中 Canvas 组件会在 `start()` 阶段自动配置相机，某些设置会覆盖 Inspector 中的手动配置。常见原因：
-
-| 问题 | 现象 | 修复 |
-|------|------|------|
-| `clearFlags` 未包含 COLOR | 屏幕不刷新，留下上一帧残影或纯黑 | `cam.clearFlags = 7`（COLOR \| DEPTH \| STENCIL） |
-| `clearColor` 透明或纯黑 | 背景不可见 | `cam.clearColor = new Color(26, 26, 46, 255)` |
-| `visibility` 不包含目标层 | 所有节点被相机忽略 | `cam.visibility = 0x7FFFFFFF`（所有层） |
-| `projection` 不是 ORTHO | 2D UI 被透视裁剪 | `cam.projection = 1`（ORTHO） |
-| 节点 layer 不是 UI_2D | 节点不被 UI 相机渲染 | `node.layer = 33554432` |
-
-### 解决方案（BattleTestScaffold._fixCamera）
-```typescript
-private _fixCamera(canvas: Node): void {
-    const canvasComp = canvas.getComponent(Canvas);
-    if (!canvasComp) return;
-    const cam = canvasComp.cameraComponent;
-    if (!cam) return;
-
-    // Canvas.start() 已运行，修复被覆盖的设置
-    cam.clearFlags = 7;           // COLOR | DEPTH | STENCIL
-    cam.clearColor = new Color(26, 26, 46, 255);
-    cam.visibility = 0x7FFFFFFF;  // 所有层
-    cam.projection = 1;           // ORTHO
-    cam.orthoHeight = 400;
-    cam.near = 1;
-    cam.far = 2000;
-}
-```
-
-### 经验总结
-- 永远不要把希望寄托在 Inspector 里手动设置相机参数
-- Canvas 的 `start()` 会覆盖部分设置，在 `BattleTestScaffold.start()` 里二次修复
-- 黑屏时优先检查 `clearFlags` 和 `visibility` 两个参数
-
----
-
-## 1. 渲染层：子弹/敌人完全看不见
-
-### 问题表现
-预览时玩家、敌人都可见，但子弹完全看不到，控制台没有报错。
-
-### 根因分析（层层递进）
-
-#### 1.1 子弹从未被创建 ❌
-**原因**：`GameLoop.update()` P1 阶段只调用了 `PlayerController.tick()`，**没有调用 `WeaponSystem.tick()`**。
-
-```typescript
-// ❌ 错误：WeaponSystem.tick 完全缺失
-gameLoop.update() → PlayerController.tick() → [停止]
-
-// ✅ 修复后：
-gameLoop.update() → PlayerController.tick()
-                  → WeaponSystem.tick() → _fire() → BulletFactory.spawnBullet()
-```
-
-**解决方案**：在 `GameLoop` 解析玩家节点时同时获取 `WeaponSystem` 组件，并在 P1 阶段驱动：
-```typescript
-// GameLoop.ts
-this._weaponSystem = playerNode.getComponent(WeaponSystem);
-// ...
-this._playerController?.tick(safeDt);
-this._weaponSystem?.tick(safeDt);  // ← 新增
-```
-
-#### 1.2 lifetime 没有累加 ❌
-**原因**：`BaseBullet.tick()` 中虽然检查了 `this.attr.lifetime >= this.maxLifetime`，但**从来没有执行 `this.attr.lifetime += dt`**。
-
-```typescript
-// ❌ 错误：lifetime 永远是 0
-if (this.attr.lifetime >= this.maxLifetime) { // 0 >= 5.0 ?
-    this._despawn(); // 第一帧就自毁
-}
-
-// ✅ 修复后：
-this.attr.lifetime += dt; // ← 新增
-if (this.attr.lifetime >= this.maxLifetime) {
-    this._despawn();
-}
-```
-
-#### 1.3 子弹命中自己 ❌
-**原因**：`BaseBullet._checkHit()` 使用四叉树查询附近实体时，**没有排除自身**。由于子弹也在四叉树中注册，`dist = 0 <= radius + radius` 恒成立，导致子弹生成后第一帧就自毁。
-
-```typescript
-// ❌ 错误：没有排除自身
-for (const candidate of candidates) {
-    if (dist <= this.radius + candidate.radius) { // 会命中自己
-        this._onHit(candidate);
-    }
-}
-
-// ✅ 修复后：
-for (const candidate of candidates) {
-    if (candidate.id === this.id) continue; // ← 新增
-    if (dist <= this.radius + candidate.radius) {
-        this._onHit(candidate);
-    }
-}
-```
-
-#### 1.4 Sprite + SpriteFrame 纹理渲染不可靠 ❌
-**原因**：尝试用 `Sprite` + 程序化生成的 `SpriteFrame`（`Texture2D.uploadData`）渲染子弹，但在不同分辨率/适配模式下，SpriteFrame 的 `rect` 和 `originalSize` 赋值方式（直接修改属性 vs 使用 `Rect`/`Size` 对象）会导致渲染异常。
-
-**解决方案**：改为使用 **Graphics** 画圆，与 VFXManager 使用相同渲染方案：
-```typescript
-// ✅ 可靠方案：Graphics 画圆
-const g = this.node.addComponent(Graphics);
-g.fillColor = color;
-g.circle(0, 0, 8);
-g.fill();
-```
-
-同时确保添加 `UITransform` 组件，并将 `node.layer` 设置为 `UI_2D`（`33554432`）。
-
-### 经验总结
-| 症状 | 排查顺序 |
-|------|----------|
-| 完全看不见 | 1. 检查是否被创建（log）→ 2. 检查 lifetime → 3. 检查是否自命中 → 4. 检查渲染组件 |
-| 一闪即逝 | 1. 检查 lifetime 累加 → 2. 检查碰撞排除自身 → 3. 检查超时回池 |
-| 有节点但无像素 | 1. 检查 UITransform → 2. 检查 layer → 3. 改用 Graphics 替代 Sprite |
-
----
-
-## 2. 事件系统：EventBus 回调丢失 this
-
-### 问题表现
-子弹命中敌人触发 `VFX_FIRE_IMPACT` 事件时崩溃：
-```
-TypeError: this._spawnVFX is not a function
-```
-
-### 根因分析
-`EventBus.on()` 注册时传入了 `target`（用于 off 时精确移除），但 `EventBus.emit()` 调用回调时没有使用 `.call(target)` 绑定 `this`。
-
-```typescript
-// ❌ 错误：丢失 this
-handler.callback(...args);
-
-// ✅ 修复后：
-if (handler.target) {
-    handler.callback.call(handler.target, ...args);
-} else {
-    handler.callback(...args);
-}
-```
-
-### 影响范围
-此 bug 影响所有通过 EventBus 注册的事件回调，包括：
-- `VFXManager`（VFX_EXPLOSION 等）
-- `EnemyManager`（BULLET_HIT）
-- `ReactionProcessor`（REACTION:* 事件）
-- `GameLoop`（QUERY_PLAYER_POSITION）
-
-### 经验总结
-- 自定义事件总线必须实现 `callback.call(target, ...args)`
-- 如果不传 target，箭头函数可以规避此问题，但会失去精确 off 的能力
-
----
-
-## 3. GameLoop 架构：tick 驱动遗漏
-
-### 问题表现
-某子系统的逻辑完全不执行（如 WeaponSystem 不发射子弹）。
-
-### 根因分析
-项目采用 **"GameLoop 是唯一 update"** 架构：
-- 所有子系统禁止挂载 Cocos `update(dt)`
-- 必须暴露 `tick(dt)` 方法
-- 由 `GameLoop.update()` 按优先级统一调用
-
-如果某个子系统的 `tick()` 没有被 GameLoop 调用，整个子系统就完全停摆。
-
-### GameLoop 驱动优先级（P1→P6）
+### GameLoop tick 优先级
 ```
 P1: PlayerController.tick + WeaponSystem.tick
-P2: 所有活跃子弹 BaseBullet.tick（四叉树查询 + 命中检测）
-P3: EnemyManager.tick（同步四叉树位置）
-P4: GameManager.tick（波次生成调度）
-P5: 所有活跃敌人 EnemyStatusComponent.tick（元素衰减 + AI移动）
-P6: VFXManager.tick（特效动画 + 回收）
+P2: 敌人移动 (EnemyStatusComponent.tick)
+P3: EnemyManager.tick (重建四叉树)
+P4: BaseBullet.tick (所有子弹类)
+P5: GameManager.tick (波次)
+P6: VFXManager.tick (特效)
+P7: EnvironmentManager.tick (环境区)
 ```
-
-### 经验总结
-- 新增任何需要每帧更新的子系统时，**必须在 GameLoop 中注册 tick 调用**
-- 不要在一个 tick 中重复调用另一个系统的 tick（如 PlayerController 内调用 WeaponSystem.tick，同时 GameLoop 也调用）
 
 ---
 
-## 4. 物理/碰撞：子弹自毁 + 敌人重叠
+## 二、渲染层规范
 
-### 4.1 子弹自毁
-见 [1.3 子弹命中自己](#13-子弹命中自己)。
-
-### 4.2 敌人重叠
-**问题表现**：大量敌人从四周涌向玩家，叠成一团，无法区分个体。
-
-**解决方案**：在 `EnemyStatusComponent._tickMoveToPlayer()` 中加入软碰撞排斥力：
+### 2.1 相机设置（代码里设，别信 Inspector）
 ```typescript
-// 遍历所有其他敌人
-for (const [id, other] of enemies) {
-    if (id === this.enemyId) continue;
-    
-    const oDist = Math.sqrt(ox * ox + oy * oy);
-    const minDist = myRadius + otherRadius;
-    
-    if (oDist < minDist) {
-        const overlap = minDist - oDist;
-        const force = (overlap / minDist) * 600; // 600 px/s 最大排斥速度
-        vx -= (ox / oDist) * force;
-        vy -= (oy / oDist) * force;
-    }
-}
+cam.clearFlags = 7;                    // COLOR | DEPTH | STENCIL
+cam.clearColor = new Color(26,26,46,255);
+cam.visibility = 0x7FFFFFFF;           // 所有层
+cam.projection = 1;                    // ORTHO
+cam.orthoHeight = 400;
 ```
 
-**关键设计**：
-- 使用**速度驱动**（vx/vy）而非位置偏移，与基础移动速度自然叠加
-- 排斥力与重叠深度成正比（`overlap / minDist`），避免生硬弹开
-- 通过 `scale` 动态调整碰撞半径
+### 2.2 节点可见性 checklist
+- [ ] `node.layer = 33554432`（UI_2D）
+- [ ] 节点挂在 Canvas 下（或 Canvas 的子节点下）
+- [ ] Sprite 有 `spriteFrame` 且 `sizeMode = CUSTOM`
+- [ ] 节点 `active = true`
+- [ ] 节点 scale 不为 0
+- [ ] 对象池取出后 `setPosition()` 到正确位置
+
+### 2.3 Sprite 初始化顺序（Cocos 3.8 陷阱）
+**必须先设 `sizeMode = CUSTOM`，再设 `spriteFrame`。**
+如果顺序反过来，Cocos 会在赋值 `spriteFrame` 时自动把 `contentSize` 覆盖为纹理原始尺寸（如 64x64），导致你手动设置的 `setContentSize(48, 6)` 被覆盖，最终渲染成大方块。
+
+```typescript
+// ❌ 错：先 spriteFrame 再 sizeMode → contentSize 被覆盖为 64x64
+sp.spriteFrame = EntityVisualFactory.getWhiteSpriteFrame();
+sp.sizeMode = Sprite.SizeMode.CUSTOM;
+
+// ✅ 对：先 sizeMode 再 spriteFrame → contentSize 保持手动值
+sp.sizeMode = Sprite.SizeMode.CUSTOM;
+sp.spriteFrame = EntityVisualFactory.getWhiteSpriteFrame();
+```
+
+### 2.4 SpriteFrame 初始化（代码生成纹理时）
+直接用 `sf.rect.width = size` 赋值不会触发 Cocos 内部更新，必须走构造函数：
+
+```typescript
+// ❌ 错：直接赋值，渲染时可能取不到正确尺寸
+sf.rect.width = size;
+sf.rect.height = size;
+
+// ✅ 对：用 Rect / Size / Vec2 构造函数初始化
+sf.rect = new Rect(0, 0, size, size);
+sf.originalSize = new Size(size, size);
+sf.offset = new Vec2(0, 0);
+```
+
+> 缓存 key 加版本号前缀（如 `v2|...`），修改 SpriteFrame 初始化方式后确保旧缓存失效。
+
+### 2.5 子弹/敌人颜色
+子弹用 Sprite（非 Graphics），颜色通过 `Sprite.color` 设置：
+```typescript
+const ELEMENT_COLORS: Record<ElementType, Color> = {
+    [ElementType.NONE]: new Color(200,200,200,255),
+    [ElementType.OIL]: new Color(180,120,40,255),
+    [ElementType.FIRE]: new Color(255,80,20,255),
+    [ElementType.LIGHTNING]: new Color(100,200,255,255),
+    [ElementType.WATER]: new Color(50,150,255,255),
+    [ElementType.GLUE]: new Color(200,80,255,255),
+};
+```
 
 ---
 
-## 5. 坐标系：UI 坐标 vs Canvas 局部坐标
+## 三、对象池规范
 
-### 问题表现
-角色拖拽移动时，手指和角色之间存在固定偏移，越往屏幕边缘偏移越大。
-
-### 根因分析
-Cocos Creator 3.x 中存在两个不同的坐标系：
-
-| 坐标系 | 原点 | 获取方式 | 用途 |
-|--------|------|----------|------|
-| **UI 坐标** | 屏幕左上角 | `event.getUILocation()` | 触摸事件原始位置 |
-| **Canvas 局部坐标** | Canvas 中心 | `node.position` | 节点在 Canvas 中的位置 |
-
-错误地混用两者：
+### 3.1 注册与预生成
 ```typescript
-// ❌ 错误：UI 坐标和 Canvas 坐标混用
-const uiPos = event.getUILocation(); // 左上角原点
-const pos = this.node.position;       // Canvas 中心原点
-this._dragOffset.set(pos.x - uiPos.x, pos.y - uiPos.y, 0); // 坐标系不一致！
+// 在 GameManager.start() 时注册
+PoolManager.registerPool(BulletClass, 0);
+
+// 模板节点注入后再 prewarm
+PoolManager.setTemplateNode(BulletClass, templateNode);
+PoolManager.prewarm(BulletClass, 20);
 ```
 
-### 解决方案
-新增 `_uiToCanvas()` 转换方法：
+### 3.2 回收时必须 reset 的状态清单
+
+| 状态类型 | 示例 | reset 位置 |
+|---------|------|-----------|
+| 基本类型 | `_phase`, `_timer` | `_despawn()` 或修饰器 `reset()` |
+| Set/Map | `_hitEnemyIds`, `activeElements` | 同上，必须 `.clear()` |
+| 节点属性 | `scale`, `rotation` | `init()` 开头重置 |
+| 组件引用 | `_ai`, `_target` | `init()` 开头置 null |
+
+### 3.3 典型错误
 ```typescript
-private _uiToCanvas(uiPos: { x: number; y: number }): Vec3 {
-    const canvasNode = this.node.scene?.getChildByName('Canvas');
-    const uiTransform = canvasNode?.getComponent(UITransform);
-    const designSize = uiTransform?.contentSize || screen.windowSize;
-    return new Vec3(
-        uiPos.x - designSize.width / 2,   // 减去半宽，将原点移到中心
-        uiPos.y - designSize.height / 2,  // 减去半高
-        0,
-    );
+// ❌ 错：回收时不 reset 修饰器状态
+PoolManager.despawn(bullet);
+
+// ✅ 对：_despawn() 里显式 reset
+protected _despawn(): void {
+    const boomerang = this.modifierManager.get<BoomerangModifier>('Boomerang');
+    if (boomerang) boomerang.reset(); // 必须！
+    this.modifierManager.clear();
+    this.attr.customData.clear();
+    PoolManager.despawn(this);
 }
 ```
-
-所有触摸事件统一转换后再参与计算：
-```typescript
-const canvasPos = this._uiToCanvas(event.getUILocation());
-this._dragOffset.set(pos.x - canvasPos.x, pos.y - canvasPos.y, 0);
-```
-
-### 经验总结
-- **永远不要直接将 `getUILocation()` 与 `node.position` 混用**
-- 涉及触摸交互时，第一时间统一坐标系
-- Canvas 局部坐标系 = UI 坐标 - 设计分辨率半宽高
 
 ---
 
-## 6. 边界限制：分辨率切换后出界
+## 四、事件系统（EventBus）
 
-### 问题表现
-使用固定 `worldWidth / worldHeight` 限制角色移动边界，切换分辨率后角色可以移出屏幕。
-
-### 根因分析
-固定边界（如 1200×800）与相机实际可视范围不匹配。切换分辨率后：
-- 竖屏：可视区域变窄，固定边界太宽
-- 横屏：可视区域变宽，固定边界太窄
-
-### 解决方案
-动态读取相机参数计算实际边界：
+### 4.1 基本用法
 ```typescript
-private _getCameraBounds(): { halfW: number; halfH: number } {
-    const canvas = this.node.scene?.getChildByName('Canvas')?.getComponent(Canvas);
-    const cam = canvas?.cameraComponent;
-    if (!cam) return { halfW: 1000, halfH: 1000 };
+// 监听（必须传 this，否则 off 不掉）
+EventBus.on('EVENT_NAME', this._handler, this);
 
-    const halfH = cam.orthoHeight;
-    const size = screen.windowSize;
-    const halfW = halfH * (size.width / size.height);
-    return { halfW, halfH };
-}
+// 派发
+EventBus.emit('EVENT_NAME', payload);
+
+// 销毁时注销（必须成对）
+EventBus.off('EVENT_NAME', this._handler, this);
 ```
 
-### 经验总结
-- 移动边界必须与**相机实际可视范围**绑定，而非固定数值
-- `cam.orthoHeight` 是垂直半高，水平半宽 = `orthoHeight * 宽高比`
+### 4.2 常用事件清单
+```
+BULLET_HIT          → EnemyManager 处理伤害
+REACTION:xxx        → ReactionProcessor 处理元素反应
+VFX_xxx             → VFXManager 绘制特效
+ELEMENT_APPLIED     → 敌人被附加元素
+ENEMY_RESISTED      → Tank 减伤提示
+ENEMY_DIED          → 敌人死亡
+WAVE_COMPLETE       → RoguelikeRewardSystem 弹出三选一
+REWARD_SHOW         → RewardSelectionPanel 显示面板
+GAME_PAUSE / RESUME → GameLoop 暂停/恢复
+QUERY_PLAYER_POSITION → 返回玩家 Vec3
+QUERY_ENEMY_POSITIONS → 返回敌人坐标数组
+```
 
 ---
 
-## 7. 对象池：节点层级决定可见性
+## 五、坐标系与输入
 
-### 问题表现
-对象池创建的节点有时可见，有时不可见。
-
-### 根因分析
-`PoolManager` 创建对象时，将节点挂在 `PoolManager` 自身的节点下：
+### 5.1 坐标系规则
+- 所有游戏逻辑用 **Canvas 局部坐标**（原点在屏幕中心）
+- 输入事件（Touch/Mouse）返回的是 **屏幕坐标**，必须转换：
 ```typescript
-node.parent = this._nodeParent; // PoolManager 实例的节点
-```
-
-如果 `PoolManager` 节点不在 Canvas 层级下，UI 相机无法渲染其子节点。
-
-### 解决方案
-确保 PoolManager 挂载在 Canvas 下，或在生成后将节点 parent 改为 Canvas：
-```typescript
-// BattleTestScaffold.ts
-const gameRoot = scene.getChildByName('GameRoot');
-if (gameRoot && gameRoot.parent !== canvas) {
-    gameRoot.parent = canvas; // 确保 GameRoot（含 PoolManager）在 Canvas 下
+// PlayerController 里的正确做法
+private _screenToWorld(screenPos: {x:number, y:number}): Vec3 {
+    const cam = this._getCamera();
+    return cam.screenToWorld(new Vec3(screenPos.x, screenPos.y, 0));
 }
 ```
 
-### 经验总结
-- UI 相机只渲染 Canvas 层级下的节点
-- 对象池的 parent 节点必须在 Canvas 下，否则 spawn 出来的对象不可见
-- 使用 `node.layer = 33554432`（UI_2D）确保被 UI 相机渲染
+### 5.2 拖拽移动公式
+```typescript
+// 1. 屏幕坐标 → 世界坐标
+const worldPos = cam.screenToWorld(new Vec3(touchX, touchY, 0));
+
+// 2. 世界坐标 → Canvas 局部坐标
+const localPos = canvasNode.uiTransform.convertToNodeSpaceAR(worldPos);
+
+// 3. 限制在屏幕边界内
+const clamped = this._clampPosition(localPos);
+playerNode.setPosition(clamped);
+```
+
+### 5.3 桌面浏览器输入
+桌面环境没有 TOUCH_END，必须同时监听 MOUSE_UP：
+```typescript
+node.on(Node.EventType.TOUCH_END, this._onGlobalTouchEnd, this);
+input.on(Input.EventType.MOUSE_UP, this._onGlobalMouseUp, this);
+```
 
 ---
 
-## 8. 性能优化：已落实的决策
+## 六、子弹系统
 
-### 8.1 禁用 Physics2D
-- ❌ `Physics2D` 碰撞体 → ✅ `Quadtree.query + Vec2.distance`
-- 四叉树替代物理引擎，O(log n) 查询，无碰撞回调开销
-
-### 8.2 对象池替代 instantiate/destroy
-- ❌ `instantiate / destroy` → ✅ `PoolManager.spawn / despawn`
-- 预生成 20 个子弹、30 个敌人，避免运行时 GC 卡顿
-
-### 8.3 单一 update 发动机
-- 所有子系统禁止挂载 Cocos `update()`
-- `GameLoop.update()` 是唯一 update，按优先级驱动所有 tick
-- 便于控制更新顺序（玩家 → 子弹 → 敌人 → 波次 → 元素衰减 → 特效）
-
-### 8.4 事件总线解耦
-- 子弹→敌人：`EventBus.emit("BULLET_HIT")`
-- 敌人→反应：`EventBus.emit("REACTION:xxx")`
-- 反应→特效：`EventBus.emit("VFX_xxx")`
-- 零直接引用，模块可独立测试
-
----
-
-## 快速诊断清单
-
-| 症状 | 第一排查点 | 第二排查点 |
-|------|-----------|-----------|
-| 启动黑屏 | `clearFlags` 是否包含 COLOR | `visibility` 是否包含目标 layer |
-| 子弹看不见 | `WeaponSystem.tick()` 是否被 GameLoop 调用 | `BaseBullet.init()` 是否执行 |
-| 子弹一闪即逝 | `lifetime` 是否累加 | `_checkHit()` 是否排除自身 |
-| VFX 报错 | EventBus 是否 `.call(target)` | VFXManager 是否挂载在 Canvas 下 |
-| 拖拽偏移 | `_screenToWorld()` 是否用 `getLocation()` | 是否混用 `getUILocation()` 与 `screen.windowSize` |
-| 角色出界 | 边界是否动态读取相机 | `clampPosition` 是否在所有位置更新处调用 |
-| 敌人重叠 | 排斥力公式是否正确 | 遍历范围是否包含所有活跃敌人 |
-| 节点不可见 | parent 是否在 Canvas 下 | `layer` 是否设为 `UI_2D` |
-
----
-
-## 9. 移动系统实现详解
-
-> 本文档记录项目中所有移动相关的实现方案，作为后续开发参考。
-
-### 9.1 玩家拖拽移动（PlayerController）
-
-#### 坐标系架构
-
-```
-屏幕触摸坐标 (getUILocation)
-       ↓
-[UITransform.convertToNodeSpaceAR]
-       ↓
-玩家父节点局部坐标 (node.position)
-```
-
-| 坐标系 | 获取方式 | 用途 |
-|--------|----------|------|
-| UI 空间 | `event.getUILocation()` | 触摸事件原始输入 |
-| 父节点局部空间 | `convertToNodeSpaceAR()` | 玩家 `node.position` 所在坐标系 |
-| 世界空间 | `cam.node.worldPosition` | 相机位置、边界计算 |
-
-**关键设计**：使用 `convertToNodeSpaceAR()` 而非手动计算，自动处理：
-- 父节点位移偏移
-- 父节点缩放比例
-- 多层节点嵌套
-- Canvas 适配缩放
-
-#### 核心代码
-
+### 6.1 子弹基类模板方法
 ```typescript
-// 1. 触摸坐标 → 父节点局部坐标
-private _uiToParentSpace(event: EventTouch): Vec3 {
-    const outPos = new Vec3();
-    const touchPos = event.getUILocation();
-    this._parentUITransform.convertToNodeSpaceAR(
-        new Vec3(touchPos.x, touchPos.y, 0),
-        outPos
-    );
-    return outPos;
-}
+// BaseBullet.ts —— 子类禁止覆写 _onHit
+protected _onHit(candidate: IQuadEntity): void {
+    if (this._hasHit) return;
 
-// 2. 记录初始偏移（保持手指-角色相对位置）
-private _onTouchStart(event: EventTouch): void {
-    const parentPos = this._uiToParentSpace(event);
-    const pos = this.node.position;
-    this._dragOffset.set(pos.x - parentPos.x, pos.y - parentPos.y, 0);
-}
-
-// 3. 移动时计算目标位置（含偏移）
-private _onTouchMove(event: EventTouch): void {
-    const parentPos = this._uiToParentSpace(event);
-    const rawTarget = new Vec3(
-        parentPos.x + this._dragOffset.x,
-        parentPos.y + this._dragOffset.y,
-        this.node.position.z,
-    );
-    this._targetPosition = this._clampPosition(rawTarget);
-}
-
-// 4. tick 中应用位置（带可选平滑）
-private _tickMovement(_dt: number): void {
-    if (this.moveSmoothing <= 0) {
-        nextPos = this._targetPosition.clone(); // 瞬间跟手
-    } else {
-        const t = 1 - Math.pow(1 - this.moveSmoothing, 60 * _dt);
-        nextPos = new Vec3(
-            pos.x + (this._targetPosition.x - pos.x) * t, // lerp
-            pos.y + (this._targetPosition.y - pos.y) * t,
-            pos.z,
-        );
-    }
-    this.node.setPosition(this._clampPosition(nextPos));
-}
-```
-
-#### 边界限制
-
-动态读取相机参数，并正确映射回玩家父节点局部坐标系：
-
-```typescript
-private _getCameraBounds(): { minX, maxX, minY, maxY } {
-    const halfH = cam.orthoHeight;
-    const halfW = halfH * (windowSize.width / windowSize.height);
-    
-    // 相机世界位置 → 父节点局部位置
-    const camLocalPos = new Vec3();
-    this._parentUITransform.node.inverseTransformPoint(camLocalPos, camWorldPos);
-    
-    // 考虑父节点缩放
-    const parentScale = this._parentUITransform.node.scale;
-    const finalHalfW = halfW / Math.abs(parentScale.x);
-    const finalHalfH = halfH / Math.abs(parentScale.y);
-    
-    return {
-        minX: camLocalPos.x - finalHalfW,
-        maxX: camLocalPos.x + finalHalfW,
-        minY: camLocalPos.y - finalHalfH,
-        maxY: camLocalPos.y + finalHalfH
-    };
-}
-```
-
-#### 设计要点
-
-1. **偏移模式**：按下时记录 `pos - touchPos`，移动时 `touchPos + offset`，保证角色始终保持在手指的相对位置
-2. **平滑插值**：`moveSmoothing = 0` 时瞬间跟手；`>0` 时使用指数缓动 lerp
-3. **边界钳制**：限制 `setPosition` 的最终输出，而非限制 `_targetPosition`（避免破坏偏移关系）
-4. **坐标转换**：全程使用 `convertToNodeSpaceAR` 处理父节点缩放/位移，避免手动计算误差
-
----
-
-### 9.2 敌人 AI 移动（EnemyStatusComponent）
-
-#### 移动逻辑
-
-```typescript
-private _tickMoveToPlayer(dt: number): void {
-    // 1. 查询玩家位置（通过 EventBus 解耦）
-    EventBus.emit('QUERY_PLAYER_POSITION', (pos) => {
-        targetPos = { x: pos.x, y: pos.y };
-    });
-    
-    // 2. 计算朝向玩家的基础速度
-    const dx = targetPos.x - pos.x;
-    const dy = targetPos.y - pos.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    let vx = (dx / dist) * this.moveSpeed;
-    let vy = (dy / dist) * this.moveSpeed;
-    
-    // 3. 软碰撞排斥（与其他敌人）
-    for (const [id, other] of enemies) {
-        if (id === this.enemyId) continue;
-        
-        const ox = other.node.position.x - pos.x;
-        const oy = other.node.position.y - pos.y;
-        const oDist = Math.sqrt(ox * ox + oy * oy);
-        const minDist = myRadius + otherRadius;
-        
-        if (oDist < minDist) {
-            const overlap = minDist - oDist;
-            const force = (overlap / minDist) * 600;
-            vx -= (ox / oDist) * force;  // 沿分离方向减去速度
-            vy -= (oy / oDist) * force;
+    const boomerang = this.modifierManager.get<BoomerangModifier>('Boomerang');
+    if (boomerang) {
+        if (!boomerang.hasBounced) {
+            const didBounce = boomerang.triggerBounce(candidate.id);
+            if (didBounce) this._onHitEffect(candidate);
+            return;
+        } else {
+            if (boomerang.hitEnemyIds.has(candidate.id)) return;
+            this._onHitEffect(candidate);
+            this._hasHit = true;
+            this._despawn();
+            return;
         }
     }
-    
-    // 4. 应用合速度
-    this.node.setPosition(pos.x + vx * dt, pos.y + vy * dt, pos.z);
+
+    this._hasHit = true;
+    this._onHitEffect(candidate);
+    this._despawn();
 }
+
+// 子类只覆写这个钩子
+protected _onHitEffect(_candidate: IQuadEntity): void {}
 ```
 
-#### 设计要点
-
-1. **速度驱动**：使用 `vx/vy` 速度向量，而非直接修改位置，便于多力叠加
-2. **软碰撞**：排斥力与重叠深度成正比 `(overlap / minDist)`，避免生硬弹开
-3. **力叠加**：基础移速 + 排斥力 = 合速度，自然流畅
-4. **解耦通信**：通过 `EventBus.emit('QUERY_PLAYER_POSITION')` 获取玩家位置，零直接引用
-5. **麻痹状态**：`isStunned` 时直接 `return`，跳过移动逻辑
-
----
-
-### 9.3 移动系统对比
-
-| 特性 | 玩家（PlayerController） | 敌人（EnemyStatusComponent） |
-|------|-------------------------|---------------------------|
-| 驱动方式 | 事件驱动（触摸事件） | AI 驱动（朝向玩家） |
-| 位置更新 | `setPosition(clamp(nextPos))` | `setPosition(pos + v * dt)` |
-| 平滑处理 | lerp 插值（`moveSmoothing`） | 无（直接速度应用） |
-| 碰撞处理 | 边界钳制（限制在屏幕内） | 软碰撞排斥（敌人之间不重叠） |
-| 坐标获取 | `convertToNodeSpaceAR` | 直接读取 `node.position` |
-| 目标来源 | 手指触摸位置 | EventBus 查询玩家位置 |
-
----
-
-## 10. 分辨率适配：拖拽偏移的多次修复踩坑记录
-
-> 完整记录修复 "不同分辨率下角色拖拽偏移" 时三次失败的经过，以及最终正确方案。
-
-### 10.1 问题本质
-
-| 坐标系 | 原点 | 单位 | 获取方式 |
-|--------|------|------|----------|
-| **屏幕坐标** | 屏幕左上角 | 物理像素 | `event.getLocation()` |
-| **UI 坐标** | Canvas 左上角 | 设计分辨率像素 | `event.getUILocation()` |
-| **Canvas 局部坐标** | Canvas 中心 | 设计分辨率像素 | `node.position` |
-| **世界坐标** | 场景原点 | 世界单位 | `cam.node.worldPosition` |
-
-当实际屏幕分辨率 ≠ 设计分辨率时，Canvas 会发生缩放。例如：
-- 设计分辨率 1280×720，实际屏幕 2560×1440
-- Canvas 的 `scale` 变为 2.0
-- 触摸屏幕中心：`getUILocation()` 返回 `(1280, 720)`（设计分辨率像素）
-- 但 Player 的局部坐标应该是 `(0, 0)`（不受屏幕分辨率影响）
-
-**核心矛盾**：`getUILocation()` 返回的是**设计分辨率尺度**的坐标，但当 Canvas 缩放 ≠ 1 时，这个坐标和 `node.position` 的数值尺度不匹配。
-
----
-
-### 10.2 失败方案一：Camera.screenToWorld 直接转换
-
-**代码**：
+### 6.2 子弹子类规范
 ```typescript
-// ❌ 错误：用 getUILocation() 作为 screenToWorld 的输入
-const uiPos = event.getUILocation();
-const worldPos = new Vec3();
-camera.screenToWorld(new Vec3(uiPos.x, uiPos.y, 0), worldPos);
-```
-
-**失败原因**：
-1. `screenToWorld()` 需要**屏幕坐标**（`getLocation()`），但传入了 **UI 坐标**（`getUILocation()`）
-2. 两者在分辨率 ≠ 设计分辨率时数值完全不同
-3. 结果：角色完全不响应拖拽
-
----
-
-### 10.3 失败方案二：手动计算 + Y轴翻转 + Canvas偏移
-
-**代码**：
-```typescript
-// ❌ 错误：手动翻转Y轴并加上Canvas世界偏移
-private _uiToCanvas(uiPos) {
-    const canvasWorld = canvasNode.worldPosition; // (640, 360)
-    return new Vec3(
-        canvasWorld.x + (uiPos.x - designSize.width / 2),  // 加了偏移
-        canvasWorld.y + (designSize.height / 2 - uiPos.y), // Y轴翻转
-        0,
-    );
-}
-```
-
-**失败原因**：
-1. **Y轴不需要翻转**：`getUILocation()` 的 Y 已经是相对于 Canvas 左上角，`uiPos.y - designSize.height/2` 已经是正确的 Canvas 局部坐标
-2. **Canvas 世界偏移导致尺度错误**：Player 的 `node.position` 是 Canvas **局部坐标**，但 `canvasWorld` 是**世界坐标**，两者数值尺度不同
-3. **边界中心点错误**：Camera 在 `(0, 0)`，Canvas 在 `(640, 360)`，Player 初始位置 `(0, 0)` 被误判为在边界边缘
-
-**结果**：角色只能移动到屏幕中间，向上滑角色向下走。
-
----
-
-### 10.4 失败方案三：convertToNodeSpaceAR 传入 UI 坐标
-
-**代码**：
-```typescript
-// ❌ 错误：convertToNodeSpaceAR 需要世界坐标，但传入了 UI 坐标
-const touchPos = event.getUILocation();
-uiTransform.convertToNodeSpaceAR(new Vec3(touchPos.x, touchPos.y, 0), outPos);
-```
-
-**失败原因**：
-`convertToNodeSpaceAR` 的参数必须是**世界坐标**，但 `getUILocation()` 返回的是**UI 空间坐标**（设计分辨率像素）。当 Canvas 缩放 ≠ 1 时，两者尺度不匹配，导致偏移。
-
----
-
-### 10.5 正确方案：两步转换（屏幕 → 世界 → 局部）
-
-**核心思路**：不混用坐标系，每一步只负责一种转换，完全依赖 Cocos 官方 API。
-
-```typescript
-private _uiToParentSpace(event: EventTouch): Vec3 {
-    // Step 1: 屏幕坐标 → 世界坐标
-    const screenPos = event.getLocation(); // 屏幕像素坐标
-    const worldPos = new Vec3();
-    this._camera.screenToWorld(
-        new Vec3(screenPos.x, screenPos.y, 0),
-        worldPos
-    );
-    
-    // Step 2: 世界坐标 → 父节点局部坐标
-    const localPos = new Vec3();
-    this._parentUITransform.convertToNodeSpaceAR(worldPos, localPos);
-    
-    return localPos;
-}
-```
-
-**为什么正确**：
-1. `getLocation()` 返回**屏幕像素坐标**，正是 `screenToWorld()` 需要的输入
-2. `screenToWorld()` 输出**世界坐标**，正是 `convertToNodeSpaceAR()` 需要的输入
-3. `convertToNodeSpaceAR()` 输出**父节点局部坐标**，正是 `node.position` 的坐标系
-4. 全程不手动做加减乘除，Cocos API 自动处理所有缩放和坐标系转换
-
-**边界限制同步修正**：
-```typescript
-// 相机世界边界 → 父节点局部边界
-const camWorldPos = new Vec3(cam.node.worldPosition.x, cam.node.worldPosition.y, 0);
-const camLocalPos = new Vec3();
-this._parentUITransform.node.inverseTransformPoint(camLocalPos, camWorldPos);
-
-// 半宽高根据父节点缩放调整
-const parentScale = this._parentUITransform.node.scale;
-const finalHalfW = halfW / Math.abs(parentScale.x);
-const finalHalfH = halfH / Math.abs(parentScale.y);
-```
-
----
-
-### 10.6 经验教训
-
-1. **API 参数类型必须严格匹配**：`screenToWorld` 要屏幕坐标，`convertToNodeSpaceAR` 要世界坐标
-2. **不要手动做坐标转换**：Cocos 的坐标系转换涉及缩放、锚点、位移，手动计算极易出错
-3. **原始代码的 `_uiToCanvas` 在设计分辨率下是对的**：问题只在分辨率变化时暴露
-4. **调试时先看坐标数值**：打印 `screenPos`、`worldPos`、`localPos` 的数值，确认尺度和方向
-5. **最小改动原则**：不要一遇到问题就重写核心逻辑
-
----
-
-### 10.7 失败方案四（浏览器环境）：Camera.screenToWorld + getUILocation
-
-> 在 Cocos Creator 内置预览器里工作正常后，用浏览器打开预览（窗口可自由缩放）发现拖拽偏移极大。本节记录浏览器环境下的踩坑经过。
-
-#### 问题复现
-
-- **引擎预览器**：窗口固定且通常等于设计分辨率，旧的 `_uiToCanvas`（`getUILocation - designSize/2`）工作正常。
-- **浏览器预览**：窗口大小任意变化，例如 1920×1080、1366×768、移动端竖屏等。
-- **现象**：窗口越大，角色位置越偏离手指；严重时角色卡在角落无法移动。
-
-#### 失败原因：screenToWorld 误传 UI 坐标
-
-**思路**：直接用官方 API 把触摸坐标转成世界坐标，不再手动做减法。
-
-```typescript
-// ❌ 错误代码
-private _screenToWorld(event: EventTouch): Vec3 {
-    const uiPos = event.getUILocation(); // UI 坐标（设计分辨率尺度）
-    const worldPos = new Vec3();
-    this._camera.screenToWorld(new Vec3(uiPos.x, uiPos.y, 0), worldPos);
-    return worldPos;
-}
-```
-
-**失败原因**：
-- `screenToWorld()` 需要 **屏幕像素坐标**（`getLocation()`），但传入了 **UI 坐标**（`getUILocation()`）。
-- 浏览器窗口 1920×1080 时，`getLocation()` 返回 `(960, 540)`，而 `getUILocation()` 返回 `(640, 360)`（假设设计分辨率 1280×720）。
-- API 内部把 UI 坐标当成屏幕像素去计算，结果世界坐标完全错误。
-
-**结果**：角色完全不响应拖拽，仿佛触摸事件被吞掉。
-
----
-
-### 10.8 失败方案五（浏览器环境）：手动映射 UI 坐标 → 世界坐标（混用坐标系）
-
-**思路**：既然 `getUILocation()` 是设计分辨率尺度，就手动把它映射到世界坐标，公式和相机可视范围对齐。
-
-```typescript
-// ❌ 错误代码
-private _uiToWorld(uiPos: { x: number; y: number }): Vec3 {
-    const designSize = view.getDesignResolutionSize(); // 设计分辨率
-    const halfH = this._camera.orthoHeight;
-    const winSize = screen.windowSize; // ← 屏幕像素
-    const halfW = halfH * (winSize.width / winSize.height); // ← 屏幕宽高比
-    // 用设计分辨率的坐标 去 映射基于屏幕宽高比计算出的世界边界
-    const x = (uiPos.x / designSize.width - 0.5) * (halfW * 2);
-    const y = (uiPos.y / designSize.height - 0.5) * (halfH * 2);
-    return new Vec3(x, y, 0);
-}
-```
-
-**失败原因**：
-- **混用了两个坐标系**：`uiPos` 是设计分辨率尺度（固定 1280×720），但 `halfW` 是用 **屏幕像素宽高比** 算出来的。
-- 当浏览器窗口被缩放到非设计分辨率比例时，`designSize.width/height` 与 `winSize.width/height` 的比例不一致。
-- 例如设计分辨率 1280×720（16:9），浏览器窗口缩成 1000×1000（1:1）：
-  - `halfW = 360 * (1000/1000) = 360`
-  - 但 `uiPos.x` 的范围仍是 0~1280，导致映射后的世界坐标被过度拉伸。
-
-**结果**：角色不能移动，或只在极小范围内抽搐。
-
----
-
-### 10.9 最终正确方案（浏览器环境）：屏幕像素坐标直接映射世界坐标
-
-**思路**：放弃 UI 坐标，全程使用 **屏幕像素坐标**（`getLocation()`），并与 `screen.windowSize` 做同一坐标系的线性映射。
-
-```typescript
-// ✅ 正确代码
-private _screenToWorld(screenPos: { x: number; y: number }): Vec3 {
-    if (!this._camera) {
-        this._initCamera();
+@ccclass('FireBullet')
+export class FireBullet extends BaseBullet {
+    protected _onHitEffect(candidate: IQuadEntity): void {
+        EventBus.emit('BULLET_HIT', {
+            bulletId: this.id, enemyId: candidate.id,
+            damage: this.attr.damage, element: ElementType.FIRE,
+            position: { x: this.node.position.x, y: this.node.position.y },
+        });
+        EventBus.emit('VFX_FIRE_IMPACT', { position: { x: this.node.position.x, y: this.node.position.y } });
     }
-    const winSize = screen.windowSize;
-    if (!this._camera || winSize.width <= 0 || winSize.height <= 0) {
-        return new Vec3(0, 0, 0);
-    }
-    const halfH = this._camera.orthoHeight;
-    const halfW = halfH * (winSize.width / winSize.height);
-    const x = (screenPos.x / winSize.width - 0.5) * (halfW * 2);
-    const y = (screenPos.y / winSize.height - 0.5) * (halfH * 2);
-    return new Vec3(x, y, 0);
-}
-
-// 触摸事件中使用 getLocation（屏幕像素坐标）
-private _onTouchStart(event: EventTouch): void {
-    const worldPos = this._screenToWorld(event.getLocation());
-    // ... 记录 dragOffset
-}
-
-private _onTouchMove(event: EventTouch): void {
-    const worldPos = this._screenToWorld(event.getLocation());
-    // ... 更新 targetPosition
 }
 ```
 
-**为什么正确**：
-1. `event.getLocation()` 和 `screen.windowSize` 同属 **屏幕像素坐标系**，比例恒定。
-2. `(screenPos / winSize - 0.5)` 把屏幕坐标归一化到 `[-0.5, 0.5]`。
-3. 乘以 `(halfW * 2)` / `(halfH * 2)` 映射到相机实际世界边界。
-4. 全程不涉及设计分辨率、Canvas 缩放、UI 坐标转换，不受浏览器窗口大小变化影响。
+**红线：子类 `_onHitEffect` 严禁调用 `_despawn()` 或修改 `_hasHit`**
 
 ---
 
-### 10.10 方案汇总与核心教训
+## 七、元素反应系统
 
-| 方案 | 适用环境 | 输入坐标 | 计算半宽的依据 | 结果 |
-|------|----------|----------|----------------|------|
-| 10.2 | 引擎预览器 | `getUILocation()`（UI 坐标） | 未计算，直接 API | ❌ 角色不移动 |
-| 10.3 | 引擎预览器 | `getUILocation()`（UI 坐标） | 手动 + Canvas 偏移 | ❌ 偏移+反向 |
-| 10.4 | 引擎预览器 | `getUILocation()`（UI 坐标） | `convertToNodeSpaceAR` | ❌ 偏移 |
-| 10.5 | 引擎预览器 | `getLocation()`（屏幕像素） | `screenToWorld` + API | ✅ 引擎预览器正常 |
-| 10.7 | 浏览器 | `getUILocation()`（UI 坐标） | 未计算，直接 API | ❌ 角色不移动 |
-| 10.8 | 浏览器 | `getUILocation()`（UI 坐标） | `screen.windowSize`（屏幕像素） | ❌ 混用坐标系 |
-| **10.9** | **浏览器** | **`getLocation()`（屏幕像素）** | **`screen.windowSize`（屏幕像素）** | ✅ **任意窗口精准跟随** |
+### 7.1 反应矩阵
+| 组合 | 反应名 | 倍率 | 效果 |
+|------|--------|------|------|
+| FIRE + OIL | FIRE_EXPLOSION | 2.0 | 半径 150 AOE |
+| LIGHTNING + WATER | LIGHTNING_CONDUCT | 1.5 | 连锁 5 目标 + 麻痹 2s |
+| LIGHTNING + OIL | MAGNETIC_PULL | 1.0 | 引力黑洞拉扯 3s |
+| GLUE + 任意 | MONSTER_MERGE | 0.5 | 属性叠加融合 |
 
-**核心教训**：
-1. **`getUILocation()` 与 `screen.windowSize` 绝不可混用**：前者是设计分辨率尺度，后者是物理像素尺度。
-2. **Cocos 的 `screenToWorld` 要吃屏幕坐标**：不要传 UI 坐标给它。
-3. **浏览器预览和引擎预览器是两种环境**：引擎预览器窗口通常等于设计分辨率，会掩盖坐标混用的问题；必须在浏览器中测试各种分辨率。
-4. **当同一坐标系内有比例关系时，线性映射是最可靠的**：`screenPos / screenSize → [-0.5, 0.5] → worldBounds` 没有歧义。
-5. **引擎预览器正常的方案不代表浏览器正常**：`view.getDesignResolutionSize()` 配合 `getUILocation()` 在引擎预览器里完美工作，但在浏览器自由缩放下失效。
+### 7.2 触发链路
+```
+子弹命中 → BULLET_HIT → EnemyManager._onBulletHit
+→ enemy.applyElement(newElement)
+→ ElementReactionHub.checkReaction()
+→ 若匹配 → 派发 REACTION:xxx
+→ ReactionProcessor._onReaction()
+→ 执行伤害/效果 + 派发 VFX_xxx
+```
+
+### 7.3 元素衰减
+- 默认附着时间：`5.0` 秒
+- 在 `EnemyStatusComponent.tick()` 中每帧递减
+- 附着期间敌人 Sprite 颜色应变化（待实现视觉反馈）
 
 ---
 
-## 11. 引擎预览器限定方案：view.getDesignResolutionSize
+## 八、敌人系统
 
-> ⚠️ **注意**：此方案仅在 Cocos Creator 内置预览器（窗口固定等于设计分辨率）下有效，**在浏览器自由缩放下会失效**。仅作记录，生产环境请使用 [10.9](#109-最终正确方案浏览器环境屏幕像素坐标直接映射世界坐标)。
+### 8.1 敌人类型
+| 类型 | 颜色 | 特性 |
+|------|------|------|
+| GRUNT | 红 | 普通 |
+| CHARGER | 橙 | 冲锋 |
+| FLANKER | 绿 | 侧翼包抄 |
+| TANK | 蓝灰 | 50% 元素减伤 |
+| RANGED | 紫 | 远程 |
 
-### 11.1 方案代码
-
-在保留原始 `_uiToCanvas` 思路的前提下，将尺寸来源从 `uiTransform.contentSize` 替换为 `view.getDesignResolutionSize()`。
-
+### 8.2 Tank 减伤机制
 ```typescript
-import { view } from 'cc';
-
-private _uiToCanvas(uiPos: { x: number; y: number }): Vec3 {
-    const designSize = view.getDesignResolutionSize();
-    return new Vec3(
-        uiPos.x - designSize.width / 2,
-        uiPos.y - designSize.height / 2,
-        0,
-    );
+if (config.elementResist?.includes(payload.element)) {
+    const reduced = Math.floor(payload.damage * 0.5);
+    enemy.takeDamage(reduced);
+    EventBus.emit('ENEMY_RESISTED', { enemyId, element: payload.element });
+    return;
 }
 ```
 
-### 11.2 为什么引擎预览器里可行
+---
 
-- `getUILocation()` 返回的坐标始终基于**设计分辨率**；
-- `view.getDesignResolutionSize()` 返回的也是**设计分辨率**；
-- 两者尺度完全一致，因此中心点偏移计算 `(uiPos - designSize/2)` 在引擎预览器里准确。
+## 九、肉鸽奖励系统
 
-### 11.3 为什么浏览器里失效
+### 9.1 奖励触发
+- 每波结束后 `WAVE_COMPLETE` → `RoguelikeRewardSystem._onWaveComplete()`
+- 生成 3 个选项 → `EventBus.emit('REWARD_SHOW')`
+- 选择后 `EventBus.emit('GAME_PAUSE')` / `GAME_RESUME`
 
-当浏览器窗口大小 ≠ 设计分辨率时，Canvas 的适配策略会改变 UI 坐标到屏幕坐标的映射关系，但 `view.getDesignResolutionSize()` 仍是固定值，导致 `getUILocation()` 的实际坐标尺度与预期不符。
+### 9.2 效果类型
+```typescript
+enum ModifierEffectType {
+    FIRE_RATE_UP, DAMAGE_UP, BULLET_SPEED_UP,
+    ADD_BOOMERANG, ADD_ORBIT, MULTISHOT, PIERCE,
+    ADD_FIRE_ELEMENT, ADD_OIL_ELEMENT,      // 新增
+    ADD_LIGHTNING_ELEMENT, ADD_WATER_ELEMENT, // 新增
+}
+```
+
+### 9.3 元素解锁流程
+```
+玩家选择「火种」→ RoguelikeRewardSystem._applyModifier()
+→ EventBus.emit('ADD_ELEMENT', { element: 'FIRE' })
+→ WeaponSystem._onAddElement()
+→ weapon.addElementToQueue(ElementType.FIRE)
+→ 队列变为 [..., FIRE]，发射顺序更新
+```
 
 ---
 
-*文档版本：2026-07-07*
-*适用引擎：Cocos Creator 3.8.6*
-*项目：Element Overload（2D 像素割草肉鸽）*
+## 十、敌人攻击系统
+
+### 10.1 攻击配置默认值陷阱
+**现象**：敌人不攻击，控制台显示 `damage=0 range=0`。
+**根因**：`if (config.attackDamage !== undefined)` 在运行时始终为 `false`。
+**解决**：无条件调用 + `??` 默认值：
+```typescript
+enemy.setAttackConfig(
+    config.attackDamage ?? 5,
+    config.attackRange ?? 120,
+    config.attackCooldown ?? 1.2,
+    config.attackType ?? 'MELEE'
+);
+```
+
+### 10.2 攻击延迟设计（预警 → 伤害分离）
+**时序**：
+```
+敌人进入范围 → 扇形特效（浅色预警） → 0.35s 后 → 扇形加深 + 玩家扣血
+```
+**代码要点**：
+- `_tickAttack()`：触发 VFX + 设置 `_attackDelayTimer`
+- `_tickAttackDelay()`：计时结束后才 `emit('PLAYER_DAMAGE')`
+- 玩家获得视觉预警后有充足时间拖拽躲避
+
+### 10.3 VFX 颜色加深配合伤害帧
+**技巧**：用 `progress > 0.5` 作为 `isHitFrame`，在伤害实际发生的那帧加深颜色、加粗描边，给玩家明确的命中反馈：
+```typescript
+if (isHitFrame) {
+    g.fillColor = new Color(255, 40, 10, alpha * 0.7); // 深红
+    g.lineWidth = 3;
+} else {
+    g.fillColor = new Color(255, 80, 10, alpha * 0.3); // 浅橙
+    g.lineWidth = 1.5;
+}
+```
+
+### 10.4 美术资源替换友好性
+- 攻击视觉全部走 `EventBus.emit('VFX_ENEMY_ATTACK')`，不耦合具体渲染
+- 敌人 Sprite 闪白反馈封装在 `_playAttackVisual()`，后续替换为动画/粒子只需改一处
+- 扇形半径由 `attackRange` 动态驱动，不同敌人自然有不同大小的预警范围
+
+---
+
+## 十一、踩坑精华（一句话版）
+
+| 坑 | 一句话解决 |
+|---|-----------|
+| 黑屏 | `clearFlags=7, visibility=0x7FFFFFFF, projection=1` |
+| 子弹看不见 | 检查 `layer=33554432`、是否在 Canvas 下、spriteFrame 是否设置 |
+| Sprite 变大方块 | 先 `sizeMode = CUSTOM`，再设 `spriteFrame` |
+| 对象池状态残留 | 回收时手动 `reset()` 所有 Set/Map/基本类型 |
+| 子类覆写父类方法 | 用模板方法：`_onHit` 固定 + `_onHitEffect` 钩子 |
+| EventBus 内存泄漏 | `on` 必须配对 `off`，回调必须传 `this` |
+| 坐标偏移 | 屏幕坐标 → `screenToWorld` → `convertToNodeSpaceAR` |
+| 桌面点击无效 | 同时监听 `TOUCH_END` 和 `MOUSE_UP` |
+| 子弹不自毁 | `_checkHit` 里 `PoolManager.despawn` 前确认 quadtree 已重建 |
+| 波次不启动 | `GameManager.start()` 用 `scheduleOnce` 延迟，避免时序冲突 |
+| 敌人不攻击 | 配置字段用 `??` 默认值，不要用 `!== undefined` 条件守卫 |
+| 攻击没预警 | 视觉和伤害必须分两个 tick：`_tickAttack` 发 VFX + `_tickAttackDelay` 结算 |
+
+---
+
+*版本：2026-07-09 | 引擎：Cocos Creator 3.8.6*

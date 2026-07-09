@@ -35,6 +35,15 @@ export interface EnemyConfig {
     elementResist?: ElementType[];
     isSlime?: boolean;
     damageThreshold?: number;
+    enemyType?: string; // 'GRUNT' | 'CHARGER' | 'FLANKER' | 'TANK' | 'RANGED'
+    /** 攻击伤害 */
+    attackDamage?: number;
+    /** 攻击范围（像素） */
+    attackRange?: number;
+    /** 攻击冷却（秒） */
+    attackCooldown?: number;
+    /** 攻击类型：近战 / 远程（预留） */
+    attackType?: 'MELEE' | 'RANGED';
 }
 
 @ccclass('EnemyManager')
@@ -116,6 +125,18 @@ export class EnemyManager extends Component {
         enemy.node.setPosition(position);
         enemy.reset(enemyId, config.maxHp, config.moveSpeed);
 
+        if (config.enemyType) {
+            enemy.setAI(config.enemyType as any);
+        }
+
+        // 设置攻击配置（无条件调用，config 中无值时用默认值兜底）
+        enemy.setAttackConfig(
+            config.attackDamage ?? 5,
+            config.attackRange ?? 120,
+            config.attackCooldown ?? 1.2,
+            config.attackType ?? 'MELEE',
+        );
+
         EnemyManager._enemyConfigs.set(enemyId, config);
         ReactionProcessor.registerEnemy(enemy);
 
@@ -171,15 +192,15 @@ export class EnemyManager extends Component {
 
         const config = EnemyManager._enemyConfigs.get(payload.enemyId);
 
-        // 吸收盾检测（必须存在且非空数组）
+        // 元素抗性检测（减伤 50%，不再回血）
         if (config?.elementResist?.length && config.elementResist.indexOf(payload.element) !== -1) {
-            enemy.hp = Math.min(enemy.hp + payload.damage * 0.5, enemy.maxHp);
-            enemy.scale += 0.1;
-            enemy.node.setScale(enemy.scale, enemy.scale, 1);
-            EventBus.emit('ENEMY_ABSORBED', {
+            const reducedDamage = Math.floor(payload.damage * 0.5);
+            enemy.takeDamage(reducedDamage);
+            EventBus.emit('ENEMY_RESISTED', {
                 enemyId: payload.enemyId,
                 element: payload.element,
                 position: enemy.position,
+                reducedDamage,
             });
             return;
         }
@@ -268,14 +289,89 @@ export class EnemyManager extends Component {
                 Math.sin(angle) * radius,
                 0,
             );
-            const config: EnemyConfig = {
-                maxHp: 30 + waveNumber * 10,
-                moveSpeed: 50 + waveNumber * 5,
-            };
+            const config = EnemyManager._buildEnemyConfig(waveNumber, i, enemyCount);
             EnemyManager.spawnEnemy(config, pos);
         }
 
         console.log(`[EnemyManager] 第 ${waveNumber} 波开始，生成 ${enemyCount} 个敌人`);
+    }
+
+    /**
+     * 根据波次和索引构建敌人配置（混合敌人类型）
+     */
+    private static _buildEnemyConfig(waveNumber: number, index: number, total: number): EnemyConfig {
+        const baseHp = 30 + waveNumber * 10;
+        const baseSpeed = 50 + waveNumber * 5;
+        const attackDamage = 5 + waveNumber * 2;
+        const attackRange = 120; // 增大攻击范围，确保能打到玩家
+        const attackCooldown = 1.2;
+
+        // 第 1 波：全普通怪
+        if (waveNumber === 1) {
+            return {
+                maxHp: baseHp,
+                moveSpeed: baseSpeed,
+                enemyType: 'GRUNT',
+                attackDamage,
+                attackRange,
+                attackCooldown,
+                attackType: 'MELEE',
+            };
+        }
+
+        // 从第 2 波开始引入多样化
+        const r = Math.random();
+
+        // 坦克怪：第 3 波起，低概率
+        if (waveNumber >= 3 && r < 0.15) {
+            return {
+                maxHp: baseHp * 2.5,
+                moveSpeed: baseSpeed * 0.4,
+                enemyType: 'TANK',
+                elementResist: [ElementType.FIRE, ElementType.OIL],
+                attackDamage: attackDamage * 1.5,
+                attackRange: 80,
+                attackCooldown: 1.8,
+                attackType: 'MELEE',
+            };
+        }
+
+        // 冲锋怪：第 2 波起，中等概率
+        if (waveNumber >= 2 && r < 0.35) {
+            return {
+                maxHp: baseHp,
+                moveSpeed: baseSpeed * 1.3,
+                enemyType: 'CHARGER',
+                attackDamage: attackDamage * 1.2,
+                attackRange,
+                attackCooldown: 1.0,
+                attackType: 'MELEE',
+            };
+        }
+
+        // 迂回怪：第 4 波起，中等概率
+        if (waveNumber >= 4 && r < 0.55) {
+            return {
+                maxHp: baseHp * 0.8,
+                moveSpeed: baseSpeed * 1.1,
+                enemyType: 'FLANKER',
+                attackDamage,
+                attackRange,
+                attackCooldown: 0.9,
+                attackType: 'MELEE',
+            };
+        }
+
+        // 默认普通怪
+        return {
+            maxHp: baseHp,
+            moveSpeed: baseSpeed,
+            enemyType: 'GRUNT',
+            attackDamage,
+            attackRange,
+            attackCooldown,
+            attackType: 'MELEE',
+        };
     }
 
     public static get currentWave(): number { return EnemyManager._currentWave; }

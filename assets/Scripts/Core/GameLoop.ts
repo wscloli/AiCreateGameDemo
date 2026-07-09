@@ -13,6 +13,7 @@ import { EventBus } from './EventBus';
 import { VFXManager } from './VFXManager';
 import { EnvironmentManager } from './EnvironmentManager';
 import { BaseBullet } from '../Bullets/BaseBullet';
+import { BasicBullet } from '../Bullets/BasicBullet';
 import { OilBullet } from '../Bullets/OilBullet';
 import { FireBullet } from '../Bullets/FireBullet';
 import { LightningBullet } from '../Bullets/LightningBullet';
@@ -22,7 +23,7 @@ import { EnemyStatusComponent } from '../Enemy/EnemyStatusComponent';
 
 const { ccclass, property } = _decorator;
 
-const BULLET_CLASSES: (new () => BaseBullet)[] = [OilBullet, FireBullet, LightningBullet, WaterBullet];
+const BULLET_CLASSES: (new () => BaseBullet)[] = [BasicBullet, OilBullet, FireBullet, LightningBullet, WaterBullet];
 
 export interface FrameDebugInfo {
     bulletCount: number;

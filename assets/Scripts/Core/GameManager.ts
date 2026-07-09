@@ -15,6 +15,7 @@
  */
 
 import { _decorator, Component, Vec3, director } from 'cc';
+import { ElementType } from './ElementReactionHub';
 import { EventBus } from './EventBus';
 import { PoolManager } from './PoolManager';
 import { Quadtree } from './Quadtree';
@@ -75,6 +76,9 @@ export class GameManager extends Component {
     private _gameLoop: GameLoop | null = null;
     private _systemsInitialized: boolean = false;
 
+    private _nextWavePending: boolean = false;
+    private _nextWaveDelay: number = 0;
+
     // ────────────────────────────────
     //  生命周期
     // ────────────────────────────────
@@ -126,6 +130,15 @@ export class GameManager extends Component {
         this._gameTime += dt;
         this._tickWaveSpawning(dt);
         this._checkWaveComplete();
+
+        // 下一波延迟（受暂停影响，因为在 tick 外）
+        if (this._nextWavePending) {
+            this._nextWaveDelay -= dt;
+            if (this._nextWaveDelay <= 0) {
+                this._nextWavePending = false;
+                this.startWave(this._currentWave + 1);
+            }
+        }
     }
 
     // ────────────────────────────────
@@ -188,11 +201,13 @@ export class GameManager extends Component {
     private _registerEvents(): void {
         EventBus.on('QUERY_ENEMY_POSITIONS', this._onQueryEnemyPositions, this);
         EventBus.on('ENEMY_DIED', this._onEnemyDied, this);
+        EventBus.on('PLAYER_DEATH', this._onPlayerDeath, this);
     }
 
     private _unregisterEvents(): void {
         EventBus.off('QUERY_ENEMY_POSITIONS', this._onQueryEnemyPositions, this);
         EventBus.off('ENEMY_DIED', this._onEnemyDied, this);
+        EventBus.off('PLAYER_DEATH', this._onPlayerDeath, this);
     }
 
     // ────────────────────────────────
@@ -253,24 +268,70 @@ export class GameManager extends Component {
             const angle = Math.random() * Math.PI * 2;
             const radius = config.spawnRadius + (Math.random() - 0.5) * 100;
 
+            const enemyConfig = this._buildEnemyConfig(this._currentWave, this._waveSpawned, config.enemyCount);
             EnemyManager.spawnEnemy(
-                { maxHp: config.enemyHp, moveSpeed: config.enemySpeed },
+                enemyConfig,
                 new Vec3(Math.cos(angle) * radius, Math.sin(angle) * radius, 0),
             );
         }
+    }
+
+    /**
+     * 根据波次和索引构建敌人配置（混合敌人类型）
+     */
+    private _buildEnemyConfig(waveNumber: number, index: number, total: number): { maxHp: number; moveSpeed: number; enemyType?: string; elementResist?: ElementType[] } {
+        const baseHp = 30 + waveNumber * 10;
+        const baseSpeed = 50 + waveNumber * 5;
+
+        // 第 1 波：全普通怪
+        if (waveNumber === 1) {
+            return { maxHp: baseHp, moveSpeed: baseSpeed, enemyType: 'GRUNT' };
+        }
+
+        const r = Math.random();
+
+        // 坦克怪：第 3 波起，低概率
+        if (waveNumber >= 3 && r < 0.15) {
+            return {
+                maxHp: Math.floor(baseHp * 2.5),
+                moveSpeed: Math.floor(baseSpeed * 0.4),
+                enemyType: 'TANK',
+                elementResist: [ElementType.FIRE, ElementType.OIL],
+            };
+        }
+
+        // 冲锋怪：第 2 波起，中等概率
+        if (waveNumber >= 2 && r < 0.35) {
+            return {
+                maxHp: baseHp,
+                moveSpeed: Math.floor(baseSpeed * 1.3),
+                enemyType: 'CHARGER',
+            };
+        }
+
+        // 迂回怪：第 4 波起，中等概率
+        if (waveNumber >= 4 && r < 0.55) {
+            return {
+                maxHp: Math.floor(baseHp * 0.8),
+                moveSpeed: Math.floor(baseSpeed * 1.1),
+                enemyType: 'FLANKER',
+            };
+        }
+
+        return { maxHp: baseHp, moveSpeed: baseSpeed, enemyType: 'GRUNT' };
     }
 
     private _checkWaveComplete(): void {
         const config = this._waveConfigs[this._currentWave - 1];
         if (!config) return;
 
-        if (this._waveSpawned >= config.enemyCount && EnemyManager.aliveCount === 0) {
+        if (this._waveSpawned >= config.enemyCount && EnemyManager.aliveCount === 0 && !this._nextWavePending) {
             console.log('[GameManager] 第 ' + this._currentWave + ' 波完成！');
             EventBus.emit('WAVE_COMPLETE', { wave: this._currentWave });
 
-            this.scheduleOnce(() => {
-                this.startWave(this._currentWave + 1);
-            }, 2.0);
+            // 延迟 2s 启动下一波，使用受 GameLoop 暂停控制的计时器
+            this._nextWavePending = true;
+            this._nextWaveDelay = 2.0;
         }
     }
 
@@ -310,6 +371,10 @@ export class GameManager extends Component {
         console.log('[GameManager] 游戏结束，存活至第 ' + this._currentWave + ' 波');
     }
 
+    private _onPlayerDeath(): void {
+        this.onPlayerDeath();
+    }
+
     public restartGame(): void {
         this._gameLoop?.stopLoop();
         EnemyManager.despawnAll();
@@ -317,6 +382,9 @@ export class GameManager extends Component {
         ElementReactionHub.reset();
         ElementReactionHub.init();
         RoguelikeRewardSystem.reset();
+
+        this._nextWavePending = false;
+        this._nextWaveDelay = 0;
 
         this._quadtree = new Quadtree(this.worldWidth, this.worldHeight, this.quadtreeMaxEntities, this.quadtreeMaxDepth);
         BulletFactory.init(this._quadtree);

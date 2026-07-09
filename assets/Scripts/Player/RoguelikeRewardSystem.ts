@@ -43,6 +43,14 @@ export enum ModifierEffectType {
     PIERCE = 'PIERCE',
     /** 拾取范围提升（预留） */
     PICKUP_RANGE_UP = 'PICKUP_RANGE_UP',
+    /** 解锁火元素弹 */
+    ADD_FIRE_ELEMENT = 'ADD_FIRE_ELEMENT',
+    /** 解锁油元素弹 */
+    ADD_OIL_ELEMENT = 'ADD_OIL_ELEMENT',
+    /** 解锁雷元素弹 */
+    ADD_LIGHTNING_ELEMENT = 'ADD_LIGHTNING_ELEMENT',
+    /** 解锁水元素弹 */
+    ADD_WATER_ELEMENT = 'ADD_WATER_ELEMENT',
 }
 
 /** 单个修改器定义 */
@@ -108,6 +116,12 @@ export class RoguelikeRewardSystem extends Component {
         // 传说
         { id: 'multishot_2', name: '弹幕风暴', description: '每次发射 +3 发子弹', rarity: ModifierRarity.LEGENDARY, effectType: ModifierEffectType.MULTISHOT, value: 3, maxStack: 1, icon: 'icon_multishot' },
         { id: 'pierce_1', name: '贯穿之光', description: '子弹可穿透 3 个敌人', rarity: ModifierRarity.LEGENDARY, effectType: ModifierEffectType.PIERCE, value: 3, maxStack: 1, icon: 'icon_pierce' },
+
+        // 元素解锁（普通稀有度，但只能选一次）
+        { id: 'elem_fire', name: '火种', description: '解锁火元素子弹（可触发爆炸反应）', rarity: ModifierRarity.COMMON, effectType: ModifierEffectType.ADD_FIRE_ELEMENT, value: 1, maxStack: 1, icon: 'icon_fire' },
+        { id: 'elem_oil', name: '焦油', description: '解锁油元素子弹（可触发爆炸/引力反应）', rarity: ModifierRarity.COMMON, effectType: ModifierEffectType.ADD_OIL_ELEMENT, value: 1, maxStack: 1, icon: 'icon_oil' },
+        { id: 'elem_lightning', name: '静电', description: '解锁雷元素子弹（可触发感电/引力反应）', rarity: ModifierRarity.COMMON, effectType: ModifierEffectType.ADD_LIGHTNING_ELEMENT, value: 1, maxStack: 1, icon: 'icon_lightning' },
+        { id: 'elem_water', name: '清泉', description: '解锁水元素子弹（可触发感电反应）', rarity: ModifierRarity.COMMON, effectType: ModifierEffectType.ADD_WATER_ELEMENT, value: 1, maxStack: 1, icon: 'icon_water' },
     ];
 
     protected onLoad(): void {
@@ -285,6 +299,18 @@ export class RoguelikeRewardSystem extends Component {
                 break;
             case ModifierEffectType.PICKUP_RANGE_UP:
                 // 预留
+                break;
+            case ModifierEffectType.ADD_FIRE_ELEMENT:
+                EventBus.emit('ADD_ELEMENT', { element: 'FIRE' });
+                break;
+            case ModifierEffectType.ADD_OIL_ELEMENT:
+                EventBus.emit('ADD_ELEMENT', { element: 'OIL' });
+                break;
+            case ModifierEffectType.ADD_LIGHTNING_ELEMENT:
+                EventBus.emit('ADD_ELEMENT', { element: 'LIGHTNING' });
+                break;
+            case ModifierEffectType.ADD_WATER_ELEMENT:
+                EventBus.emit('ADD_ELEMENT', { element: 'WATER' });
                 break;
         }
     }

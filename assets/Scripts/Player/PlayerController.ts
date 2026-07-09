@@ -9,7 +9,9 @@
  * - 不挂载 Cocos update，由 GameLoop 调用 tick(dt)
  */
 
-import { _decorator, Component, Vec3, input, Input, EventTouch, screen, Canvas, view, Camera } from 'cc';
+import { _decorator, Component, Vec3, input, Input, EventTouch, screen, Canvas, view, Camera, Node } from 'cc';
+import { HPBar } from '../UI/HPBar';
+import { EventBus } from '../Core/EventBus';
 
 const { ccclass, property } = _decorator;
 
@@ -32,6 +34,57 @@ export class PlayerController extends Component {
     private _isDragging: boolean = false;
     private _dragOffset: Vec3 = new Vec3(0, 0, 0);
     private _camera: Camera | null = null;
+
+    // ── 生命值系统 ──
+    @property
+    public maxHp: number = 100;
+    public hp: number = 100;
+    private _hpBarNode: Node | null = null;
+    private _hpBar: HPBar | null = null;
+
+    /**
+     * 初始化 HPBar（由 BattleTestScaffold 调用）
+     */
+    public initHpBar(): void {
+        if (this._hpBar) return;
+        this.hp = this.maxHp;
+
+        this._hpBarNode = new Node('PlayerHPBar');
+        this.node.addChild(this._hpBarNode);
+
+        this._hpBar = this._hpBarNode.addComponent(HPBar);
+        this._hpBar.init(true, 64, 40);
+    }
+
+    /** 受到伤害 */
+    public takeDamage(damage: number): void {
+        if (this.hp <= 0) return;
+        this.hp -= damage;
+        if (this.hp < 0) this.hp = 0;
+
+        this._hpBar?.setProgress(this.hp / this.maxHp);
+
+        // 受击视觉反馈（位置在玩家身上）
+        const pos = this.node.position;
+        EventBus.emit('VFX_PLAYER_HIT', {
+            position: { x: pos.x, y: pos.y },
+        });
+
+        if (this.hp <= 0) {
+            EventBus.emit('PLAYER_DEATH');
+        }
+    }
+
+    /** 重置生命值（游戏重启时） */
+    public resetHp(): void {
+        this.hp = this.maxHp;
+        this._hpBar?.setProgress(1);
+        this._hpBar?.setVisible(true);
+    }
+
+    private _onGameStart(): void {
+        this.resetHp();
+    }
 
     private _initCamera(): void {
         const canvas = this.node.scene?.getChildByName('Canvas')?.getComponent(Canvas);
@@ -101,6 +154,8 @@ export class PlayerController extends Component {
         input.on(Input.EventType.TOUCH_MOVE, this._onTouchMove, this);
         input.on(Input.EventType.TOUCH_END, this._onTouchEnd, this);
         input.on(Input.EventType.TOUCH_CANCEL, this._onTouchEnd, this);
+        EventBus.on('GAME_START', this._onGameStart, this);
+        EventBus.on('PLAYER_DAMAGE', this._onPlayerDamage, this);
     }
 
     protected onDestroy(): void {
@@ -108,6 +163,12 @@ export class PlayerController extends Component {
         input.off(Input.EventType.TOUCH_MOVE, this._onTouchMove, this);
         input.off(Input.EventType.TOUCH_END, this._onTouchEnd, this);
         input.off(Input.EventType.TOUCH_CANCEL, this._onTouchEnd, this);
+        EventBus.off('GAME_START', this._onGameStart, this);
+        EventBus.off('PLAYER_DAMAGE', this._onPlayerDamage, this);
+    }
+
+    private _onPlayerDamage(payload: { damage: number; sourceId: string; sourceType: string; position: { x: number; y: number } }): void {
+        this.takeDamage(payload.damage);
     }
 
     public tick(dt: number): void {

@@ -21,6 +21,7 @@ import { EnemyManager } from '../Enemy/EnemyManager';
 import { EventBus } from './EventBus';
 import { PoolManager } from './PoolManager';
 import { EntityVisualFactory } from './EntityVisualFactory';
+import { BasicBullet } from '../Bullets/BasicBullet';
 import { OilBullet } from '../Bullets/OilBullet';
 import { FireBullet } from '../Bullets/FireBullet';
 import { LightningBullet } from '../Bullets/LightningBullet';
@@ -101,6 +102,7 @@ export class BattleTestScaffold extends Component {
 
         const controller = playerNode.addComponent(PlayerController);
         controller.moveSmoothing = 0.0; // 0=瞬间跟手，>0=平滑插值
+        controller.initHpBar();
 
         const weapon = playerNode.addComponent(WeaponSystem);
         weapon.baseFireInterval = 0.5;
@@ -188,6 +190,13 @@ export class BattleTestScaffold extends Component {
      */
     private _registerVisualTemplates(): void {
         // 子弹模板
+        PoolManager.setTemplateNode(BasicBullet, EntityVisualFactory.createTemplateNode({
+            name: 'BasicBulletTemplate',
+            size: { width: 16, height: 16 },
+            color: { r: 180, g: 180, b: 180, a: 255 },
+            outline: { r: 120, g: 120, b: 120, a: 255 },
+        }));
+
         PoolManager.setTemplateNode(OilBullet, EntityVisualFactory.createTemplateNode({
             name: 'OilBulletTemplate',
             size: { width: 24, height: 24 },
@@ -225,13 +234,14 @@ export class BattleTestScaffold extends Component {
         }));
 
         // 模板注册完毕后，手动 prewarm
+        PoolManager.prewarm(BasicBullet, 20);
         PoolManager.prewarm(OilBullet, 20);
         PoolManager.prewarm(FireBullet, 20);
         PoolManager.prewarm(LightningBullet, 20);
         PoolManager.prewarm(WaterBullet, 20);
         PoolManager.prewarm(EnemyStatusComponent, 30);
 
-        console.log('[BattleTestScaffold] 已注册 5 种运行时视觉模板并完成 prewarm');
+        console.log('[BattleTestScaffold] 已注册 6 种运行时视觉模板并完成 prewarm');
     }
 
     private _mountUI(canvas: Node): void {

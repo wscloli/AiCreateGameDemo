@@ -40,10 +40,7 @@ export class FireBullet extends BaseBullet {
         this.attr.customData.set('bullet_trail', 'fire');
     }
 
-    protected _onHit(candidate: IQuadEntity): void {
-        if (this._hasHit) return;
-        this._hasHit = true;
-
+    protected _onHitEffect(candidate: IQuadEntity): void {
         EventBus.emit('BULLET_HIT', {
             bulletId: this.id,
             enemyId: candidate.id,
@@ -56,7 +53,5 @@ export class FireBullet extends BaseBullet {
             position: { x: this.node.position.x, y: this.node.position.y },
             enemyId: candidate.id,
         });
-
-        this._despawn();
     }
 }

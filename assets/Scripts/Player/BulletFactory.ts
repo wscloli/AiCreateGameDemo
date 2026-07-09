@@ -15,6 +15,7 @@ import { ElementType } from '../Core/ElementReactionHub';
 import { PoolManager } from '../Core/PoolManager';
 import { Quadtree } from '../Core/Quadtree';
 import { BaseBullet } from '../Bullets/BaseBullet';
+import { BasicBullet } from '../Bullets/BasicBullet';
 import { OilBullet } from '../Bullets/OilBullet';
 import { FireBullet } from '../Bullets/FireBullet';
 import { LightningBullet } from '../Bullets/LightningBullet';
@@ -40,6 +41,7 @@ export interface BulletSpawnConfig {
 
 /** 元素类型 → 子弹类映射 */
 const ELEMENT_BULLET_CLASS: Record<string, new () => BaseBullet> = {
+    [ElementType.NONE]: BasicBullet,
     [ElementType.OIL]: OilBullet,
     [ElementType.FIRE]: FireBullet,
     [ElementType.LIGHTNING]: LightningBullet,
@@ -67,7 +69,7 @@ export class BulletFactory extends Component {
         BulletFactory._modifierRegistry.set('Orbit', () => new OrbitModifier(80, 3.0, 0));
 
         // 注册所有元素子弹的对象池（不预生成，模板节点由外部注入后再手动 prewarm）
-        const bulletClasses: (new () => BaseBullet)[] = [OilBullet, FireBullet, LightningBullet, WaterBullet];
+        const bulletClasses: (new () => BaseBullet)[] = [BasicBullet, OilBullet, FireBullet, LightningBullet, WaterBullet];
         for (const cls of bulletClasses) {
             PoolManager.registerPool(cls, 0);
         }

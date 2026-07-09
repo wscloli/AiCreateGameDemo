@@ -36,7 +36,10 @@ export class VFXManager extends Component {
         EventBus.on('VFX_FIRE_IMPACT', this._onHitImpact, this);
         EventBus.on('VFX_OIL_SPLASH', this._onHitImpact, this);
         EventBus.on('VFX_WATER_SPLASH', this._onHitImpact, this);
+        EventBus.on('VFX_HIT_IMPACT', this._onHitImpact, this);
         EventBus.on('VFX_MAGNETIC_PULL', this._onMagneticPull, this);
+        EventBus.on('VFX_PLAYER_HIT', this._onPlayerHit, this);
+        EventBus.on('VFX_ENEMY_ATTACK', this._onEnemyAttack, this);
     }
 
     protected onDestroy(): void {
@@ -46,7 +49,10 @@ export class VFXManager extends Component {
         EventBus.off('VFX_FIRE_IMPACT', this._onHitImpact, this);
         EventBus.off('VFX_OIL_SPLASH', this._onHitImpact, this);
         EventBus.off('VFX_WATER_SPLASH', this._onHitImpact, this);
+        EventBus.off('VFX_HIT_IMPACT', this._onHitImpact, this);
         EventBus.off('VFX_MAGNETIC_PULL', this._onMagneticPull, this);
+        EventBus.off('VFX_PLAYER_HIT', this._onPlayerHit, this);
+        EventBus.off('VFX_ENEMY_ATTACK', this._onEnemyAttack, this);
     }
 
     /**
@@ -89,6 +95,14 @@ export class VFXManager extends Component {
 
     private _onMagneticPull(payload: { position: { x: number; y: number }; radius: number }): void {
         this._spawnVFX('magnetic_pull', payload.position, 0.4, payload);
+    }
+
+    private _onPlayerHit(payload: { position: { x: number; y: number } }): void {
+        this._spawnVFX('player_hit', payload.position, 0.25, payload);
+    }
+
+    private _onEnemyAttack(payload: { position: { x: number; y: number }; angle: number; radius: number }): void {
+        this._spawnVFX('enemy_attack', payload.position, 0.3, payload);
     }
 
     // ────────────────────────────────
@@ -201,6 +215,77 @@ export class VFXManager extends Component {
                     else g.lineTo(x, y);
                 }
                 g.stroke();
+                break;
+            }
+
+            case 'player_hit': {
+                // 玩家受击：红色扩散环 + 内部闪白
+                const radius = progress * 24;
+                const alpha = Math.floor((1 - progress) * 180);
+                g.strokeColor = new Color(255, 60, 60, alpha);
+                g.lineWidth = 3;
+                g.circle(0, 0, radius);
+                g.stroke();
+                // 内圈
+                g.fillColor = new Color(255, 100, 100, Math.floor(alpha * 0.4));
+                g.circle(0, 0, radius * 0.5);
+                g.fill();
+                break;
+            }
+
+            case 'enemy_attack': {
+                // 敌人近战攻击扇形圆弧：前半段淡色预警，后半段加深（伤害判定瞬间）
+                const r = vfx.data.radius || 100;
+                const angle = vfx.data.angle || 0;
+                const spread = Math.PI / 3; // 60度扇形
+                const startAngle = angle - spread / 2;
+                const endAngle = angle + spread / 2;
+                // 后半段(progress>0.5)加深颜色，模拟伤害判定瞬间
+                const isHitFrame = progress > 0.5;
+                const alpha = Math.floor((1 - progress) * (isHitFrame ? 255 : 160));
+                const fillAlpha = Math.floor((1 - progress) * (isHitFrame ? 0.7 : 0.3) * 255);
+
+                // 填充扇形
+                g.fillColor = new Color(255, isHitFrame ? 40 : 80, 10, fillAlpha);
+                g.moveTo(0, 0);
+                const segments = 16;
+                for (let i = 0; i <= segments; i++) {
+                    const a = startAngle + (i / segments) * (endAngle - startAngle);
+                    g.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+                }
+                g.lineTo(0, 0);
+                g.fill();
+
+                // 外圈弧线
+                g.strokeColor = new Color(255, isHitFrame ? 100 : 200, 50, alpha);
+                g.lineWidth = isHitFrame ? 4 : 2;
+                g.moveTo(Math.cos(startAngle) * r, Math.sin(startAngle) * r);
+                for (let i = 0; i <= segments; i++) {
+                    const a = startAngle + (i / segments) * (endAngle - startAngle);
+                    g.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+                }
+                g.stroke();
+
+                // 两条边界线
+                g.strokeColor = new Color(255, isHitFrame ? 80 : 160, 30, alpha);
+                g.lineWidth = isHitFrame ? 3 : 1;
+                g.moveTo(0, 0);
+                g.lineTo(Math.cos(startAngle) * r, Math.sin(startAngle) * r);
+                g.moveTo(0, 0);
+                g.lineTo(Math.cos(endAngle) * r, Math.sin(endAngle) * r);
+                g.stroke();
+
+                // 伤害判定瞬间：中心闪烁十字
+                if (isHitFrame) {
+                    g.strokeColor = new Color(255, 255, 255, Math.floor((progress - 0.5) * 2 * 200));
+                    g.lineWidth = 2;
+                    const flashLen = 8;
+                    g.moveTo(-flashLen, 0);
+                    g.lineTo(flashLen, 0);
+                    g.moveTo(0, -flashLen);
+                    g.lineTo(0, flashLen);
+                    g.stroke();
+                }
                 break;
             }
         }

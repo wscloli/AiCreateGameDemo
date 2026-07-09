@@ -44,10 +44,7 @@ export class LightningBullet extends BaseBullet {
         });
     }
 
-    protected _onHit(candidate: IQuadEntity): void {
-        if (this._hasHit) return;
-        this._hasHit = true;
-
+    protected _onHitEffect(candidate: IQuadEntity): void {
         const hitPos = { x: this.node.position.x, y: this.node.position.y };
         this.attr.customData.set('lightning_hit_pos', hitPos);
 
@@ -64,7 +61,5 @@ export class LightningBullet extends BaseBullet {
             enemyId: candidate.id,
             origin: this.attr.customData.get('lightning_origin'),
         });
-
-        this._despawn();
     }
 }

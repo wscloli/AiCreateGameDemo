@@ -9,7 +9,7 @@
  * - 生成的模板节点可传入 PoolManager.registerPool 作为 templateNode
  */
 
-import { Node, Sprite, SpriteFrame, Texture2D, UITransform, Color } from 'cc';
+import { Node, Sprite, SpriteFrame, Texture2D, UITransform, Color, Rect, Size, Vec2 } from 'cc';
 
 export interface VisualConfig {
     /** 节点名称 */
@@ -51,7 +51,8 @@ export class EntityVisualFactory {
         color: { r: number; g: number; b: number; a: number },
         outline?: { r: number; g: number; b: number; a: number },
     ): SpriteFrame {
-        const key = `${color.r},${color.g},${color.b},${color.a}|${outline ? outline.r + ',' + outline.g + ',' + outline.b + ',' + outline.a : 'none'}`;
+        // key 带版本号，确保缓存更新后旧条目失效
+        const key = `v2|${color.r},${color.g},${color.b},${color.a}|${outline ? outline.r + ',' + outline.g + ',' + outline.b + ',' + outline.a : 'none'}`;
         if (this._spriteFrameCache.has(key)) {
             return this._spriteFrameCache.get(key)!;
         }
@@ -93,15 +94,19 @@ export class EntityVisualFactory {
 
         const sf = new SpriteFrame();
         sf.texture = texture;
-        sf.rect.width = size;
-        sf.rect.height = size;
-        sf.originalSize.width = size;
-        sf.originalSize.height = size;
-        sf.offset.x = 0;
-        sf.offset.y = 0;
+        sf.rect = new Rect(0, 0, size, size);
+        sf.originalSize = new Size(size, size);
+        sf.offset = new Vec2(0, 0);
 
         this._spriteFrameCache.set(key, sf);
         return sf;
+    }
+
+    /**
+     * 获取纯白 SpriteFrame（用于 HPBar 等需要颜色着色的组件）
+     */
+    public static getWhiteSpriteFrame(): import('cc').SpriteFrame {
+        return this._getOrCreateSpriteFrame({ r: 255, g: 255, b: 255, a: 255 }, undefined);
     }
 
     /** 清空缓存（场景切换时调用） */

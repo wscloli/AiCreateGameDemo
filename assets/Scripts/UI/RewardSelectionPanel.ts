@@ -7,7 +7,7 @@
  * 派发：RoguelikeRewardSystem.selectOption(index)
  */
 
-import { _decorator, Component, Node, Label, Color, UITransform, Graphics, EventTouch } from 'cc';
+import { _decorator, Component, Node, Label, Color, UITransform, Graphics, EventTouch, EventMouse, input, Input, view, screen } from 'cc';
 import { EventBus } from '../Core/EventBus';
 import { RoguelikeRewardSystem, RewardOption, ModifierRarity } from '../Player/RoguelikeRewardSystem';
 
@@ -27,6 +27,8 @@ export class RewardSelectionPanel extends Component {
 
     protected onDestroy(): void {
         EventBus.off('REWARD_SHOW', this._onRewardShow, this);
+        input.off(Input.EventType.TOUCH_END, this._onGlobalTouchEnd, this);
+        input.off(Input.EventType.MOUSE_UP, this._onGlobalMouseUp, this);
     }
 
     // ────────────────────────────────
@@ -91,6 +93,65 @@ export class RewardSelectionPanel extends Component {
 
         this.node.active = true;
         this._isShowing = true;
+
+        // 注册全局输入事件（同时支持触摸和鼠标，绕过 Cocos 节点事件不冒泡的问题）
+        input.on(Input.EventType.TOUCH_END, this._onGlobalTouchEnd, this);
+        input.on(Input.EventType.MOUSE_UP, this._onGlobalMouseUp, this);
+        console.log('[RewardSelectionPanel] 面板已显示，等待选择...');
+    }
+
+    /**
+     * 全局 TOUCH_END 回调：手动检测点击位置是否在卡片范围内
+     * 原因：Cocos 3.x 节点事件不冒泡，_bgNode/Label 会拦截卡片事件，导致卡片 on(TOUCH_END) 无法触发
+     */
+    private _onGlobalTouchEnd(event: EventTouch): void {
+        if (!this._isShowing) return;
+        const touchPos = event.getUILocation();
+        const designSize = view.getDesignResolutionSize();
+        // UI 坐标 → this.node 局部坐标（this.node 在 Canvas 中心）
+        const localX = touchPos.x - designSize.width / 2;
+        const localY = designSize.height / 2 - touchPos.y;
+        this._trySelectCard(localX, localY);
+    }
+
+    private _onGlobalMouseUp(event: EventMouse): void {
+        if (!this._isShowing) return;
+        const screenLoc = event.getLocation();
+        const screenSize = screen.windowSize;
+        const designSize = view.getDesignResolutionSize();
+        // 屏幕像素 → UI 坐标（左下角原点）
+        const uiX = screenLoc.x * (designSize.width / screenSize.width);
+        const uiY = (screenSize.height - screenLoc.y) * (designSize.height / screenSize.height);
+        // UI 坐标 → this.node 局部坐标
+        const localX = uiX - designSize.width / 2;
+        const localY = designSize.height / 2 - uiY;
+        this._trySelectCard(localX, localY);
+    }
+
+    private _trySelectCard(localX: number, localY: number): void {
+        for (let i = 0; i < this._cardNodes.length; i++) {
+            const card = this._cardNodes[i];
+            if (!card.isValid) continue;
+
+            const cardPos = card.position;
+            const cardUt = card.getComponent(UITransform);
+            if (!cardUt) continue;
+
+            const halfW = cardUt.width / 2;
+            const halfH = cardUt.height / 2;
+
+            if (localX >= cardPos.x - halfW && localX <= cardPos.x + halfW &&
+                localY >= cardPos.y - halfH && localY <= cardPos.y + halfH) {
+                console.log(`[RewardSelectionPanel] 选择了卡片 ${i}`);
+                this._isShowing = false;
+                RoguelikeRewardSystem.selectOption(i);
+                this.node.active = false;
+                this._clearCards();
+                input.off(Input.EventType.TOUCH_END, this._onGlobalTouchEnd, this);
+                input.off(Input.EventType.MOUSE_UP, this._onGlobalMouseUp, this);
+                return;
+            }
+        }
     }
 
     // ────────────────────────────────
@@ -132,14 +193,8 @@ export class RewardSelectionPanel extends Component {
         descLabel.overflow = Label.Overflow.RESIZE_HEIGHT;
         descLabel.getComponent(UITransform)!.setContentSize(180, 80);
 
-        // 点击事件（整个卡片可点）
-        card.on(Node.EventType.TOUCH_END, () => {
-            if (!this._isShowing) return;
-            this._isShowing = false;
-            RoguelikeRewardSystem.selectOption(index);
-            this.node.active = false;
-            this._clearCards();
-        }, this);
+        // 点击检测已移至全局 _onGlobalTouchEnd，卡片本身不再注册 node.on 事件
+        // 原因：Cocos 3.x 节点事件不冒泡，_bgNode/Label 会阻断事件到达卡片
 
         return card;
     }
