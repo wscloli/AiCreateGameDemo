@@ -10,6 +10,10 @@
 import { _decorator, Component, Node, Label, Color, UITransform, Graphics, EventTouch, EventMouse, input, Input, view, screen } from 'cc';
 import { EventBus } from '../Core/EventBus';
 import { RoguelikeRewardSystem, RewardOption, ModifierRarity } from '../Player/RoguelikeRewardSystem';
+import { EnemyManager } from '../Enemy/EnemyManager';
+import { BulletFactory } from '../Player/BulletFactory';
+import { VFXManager } from '../Core/VFXManager';
+import { PlayerController } from '../Player/PlayerController';
 
 const { ccclass } = _decorator;
 
@@ -39,15 +43,15 @@ export class RewardSelectionPanel extends Component {
         const canvas = this.node.scene?.getChildByName('Canvas');
         if (!canvas) return;
         this.node.parent = canvas;
-        this.node.setSiblingIndex(999);
+        this.node.setSiblingIndex(9999);
 
-        // 半透明遮罩
+        // 全屏不透明遮罩，彻底盖住角色和敌人
         this._bgNode = new Node('BG');
         this.node.addChild(this._bgNode);
         const bgUt = this._bgNode.addComponent(UITransform);
         bgUt.setContentSize(800, 600);
         const bgG = this._bgNode.addComponent(Graphics);
-        bgG.fillColor = new Color(0, 0, 0, 180);
+        bgG.fillColor = new Color(0, 0, 0, 230);
         bgG.rect(-400, -300, 800, 600);
         bgG.fill();
 
@@ -79,7 +83,14 @@ export class RewardSelectionPanel extends Component {
 
     private _onRewardShow(payload: { wave: number; options: RewardOption[] }): void {
         this._clearCards();
-        this._titleLabel!.string = `第 ${payload.wave} 波完成 — 选择奖励`;
+        if (payload.wave === 0) {
+            this._titleLabel!.string = '战斗前准备 — 选择初始奖励';
+        } else {
+            this._titleLabel!.string = `第 ${payload.wave} 波完成 — 选择奖励`;
+        }
+
+        // 回收所有敌人和子弹，防止干扰选择
+        this._clearGameEntities();
 
         const spacing = 260;
         const startX = -((payload.options.length - 1) * spacing) / 2;
@@ -92,6 +103,7 @@ export class RewardSelectionPanel extends Component {
         }
 
         this.node.active = true;
+        this.node.setSiblingIndex(9999);
         this._isShowing = true;
 
         // 注册全局输入事件（同时支持触摸和鼠标，绕过 Cocos 节点事件不冒泡的问题）
@@ -149,6 +161,8 @@ export class RewardSelectionPanel extends Component {
                 this._clearCards();
                 input.off(Input.EventType.TOUCH_END, this._onGlobalTouchEnd, this);
                 input.off(Input.EventType.MOUSE_UP, this._onGlobalMouseUp, this);
+                // 恢复玩家到场景中心
+                this._respawnPlayer();
                 return;
             }
         }
@@ -237,5 +251,26 @@ export class RewardSelectionPanel extends Component {
             }
         }
         this._cardNodes.length = 0;
+    }
+
+    /** 回收敌人、子弹、特效，并隐藏玩家 */
+    private _clearGameEntities(): void {
+        EnemyManager.despawnAll();
+        BulletFactory.despawnAllBullets();
+        VFXManager.instance?.clearAll();
+
+        const pc = PlayerController.instance;
+        if (pc && pc.node) {
+            pc.node.active = false;
+        }
+    }
+
+    /** 将玩家恢复到场景中心 */
+    private _respawnPlayer(): void {
+        const pc = PlayerController.instance;
+        if (pc && pc.node) {
+            pc.node.setPosition(0, 0, 0);
+            pc.node.active = true;
+        }
     }
 }

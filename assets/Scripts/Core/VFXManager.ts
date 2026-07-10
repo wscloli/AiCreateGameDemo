@@ -26,10 +26,12 @@ interface VFXInstance {
 
 @ccclass('VFXManager')
 export class VFXManager extends Component {
+    public static instance: VFXManager | null = null;
     private _vfxList: VFXInstance[] = [];
     private _canvas: Node | null = null;
 
     protected onLoad(): void {
+        VFXManager.instance = this;
         EventBus.on('VFX_EXPLOSION', this._onExplosion, this);
         EventBus.on('VFX_LIGHTNING_STRIKE', this._onLightningStrike, this);
         EventBus.on('VFX_LIGHTNING_CHAIN', this._onLightningChain, this);
@@ -43,6 +45,7 @@ export class VFXManager extends Component {
     }
 
     protected onDestroy(): void {
+        VFXManager.instance = null;
         EventBus.off('VFX_EXPLOSION', this._onExplosion, this);
         EventBus.off('VFX_LIGHTNING_STRIKE', this._onLightningStrike, this);
         EventBus.off('VFX_LIGHTNING_CHAIN', this._onLightningChain, this);
@@ -288,6 +291,13 @@ export class VFXManager extends Component {
                 }
                 break;
             }
+        }
+    }
+
+    /** 立即清除所有特效 */
+    public clearAll(): void {
+        for (let i = this._vfxList.length - 1; i >= 0; i--) {
+            this._recycleVFX(i);
         }
     }
 

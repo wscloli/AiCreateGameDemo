@@ -26,6 +26,7 @@ const { ccclass, property } = _decorator;
  */
 @ccclass('PlayerController')
 export class PlayerController extends Component {
+    public static instance: PlayerController | null = null;
     /** 拖拽时是否施加轻微平滑（0=瞬间跟手，1=完全不跟） */
     @property
     public moveSmoothing: number = 0.15;
@@ -150,6 +151,7 @@ export class PlayerController extends Component {
     }
 
     protected onLoad(): void {
+        PlayerController.instance = this;
         input.on(Input.EventType.TOUCH_START, this._onTouchStart, this);
         input.on(Input.EventType.TOUCH_MOVE, this._onTouchMove, this);
         input.on(Input.EventType.TOUCH_END, this._onTouchEnd, this);
@@ -159,6 +161,9 @@ export class PlayerController extends Component {
     }
 
     protected onDestroy(): void {
+        if (PlayerController.instance === this) {
+            PlayerController.instance = null;
+        }
         input.off(Input.EventType.TOUCH_START, this._onTouchStart, this);
         input.off(Input.EventType.TOUCH_MOVE, this._onTouchMove, this);
         input.off(Input.EventType.TOUCH_END, this._onTouchEnd, this);

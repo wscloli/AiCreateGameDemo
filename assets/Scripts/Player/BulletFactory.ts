@@ -53,6 +53,7 @@ export class BulletFactory extends Component {
     private static _bulletIdCounter: number = 0;
     private static _quadtree: Quadtree | null = null;
     private static _globalModifiers: BulletModifier[] = [];
+    private static _bulletClasses: (new () => BaseBullet)[] = [];
 
     /** 修饰器注册表（肉鸽奖励动态添加） */
     private static _modifierRegistry: Map<string, () => BulletModifier> = new Map();
@@ -69,12 +70,19 @@ export class BulletFactory extends Component {
         BulletFactory._modifierRegistry.set('Orbit', () => new OrbitModifier(80, 3.0, 0));
 
         // 注册所有元素子弹的对象池（不预生成，模板节点由外部注入后再手动 prewarm）
-        const bulletClasses: (new () => BaseBullet)[] = [BasicBullet, OilBullet, FireBullet, LightningBullet, WaterBullet];
-        for (const cls of bulletClasses) {
+        BulletFactory._bulletClasses = [BasicBullet, OilBullet, FireBullet, LightningBullet, WaterBullet];
+        for (const cls of BulletFactory._bulletClasses) {
             PoolManager.registerPool(cls, 0);
         }
 
         console.log('[BulletFactory] 初始化完成，已注册 4 种子弹池');
+    }
+
+    /** 回收所有活跃子弹 */
+    public static despawnAllBullets(): void {
+        for (const cls of BulletFactory._bulletClasses) {
+            PoolManager.despawnAll(cls);
+        }
     }
 
     // ────────────────────────────────

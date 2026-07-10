@@ -10,6 +10,10 @@
 import { _decorator, Component, Node, Label, Color, UITransform, EventTouch, Graphics } from 'cc';
 import { EventBus } from '../Core/EventBus';
 import { GameManager } from '../Core/GameManager';
+import { EnemyManager } from '../Enemy/EnemyManager';
+import { BulletFactory } from '../Player/BulletFactory';
+import { VFXManager } from '../Core/VFXManager';
+import { PlayerController } from '../Player/PlayerController';
 
 const { ccclass } = _decorator;
 
@@ -42,15 +46,15 @@ export class GameOverPanel extends Component {
         const canvas = this.node.scene?.getChildByName('Canvas');
         if (!canvas) return;
         this.node.parent = canvas;
-        this.node.setSiblingIndex(1000);
+        this.node.setSiblingIndex(9999);
 
-        // 半透明背景遮罩
+        // 全屏不透明背景遮罩，彻底盖住角色和敌人
         this._bgNode = new Node('BG');
         this.node.addChild(this._bgNode);
         const bgUt = this._bgNode.addComponent(UITransform);
         bgUt.setContentSize(800, 600);
         const bgG = this._bgNode.addComponent(Graphics);
-        bgG.fillColor = new Color(0, 0, 0, 200);
+        bgG.fillColor = new Color(0, 0, 0, 230);
         bgG.rect(-400, -300, 800, 600);
         bgG.fill();
 
@@ -125,7 +129,24 @@ export class GameOverPanel extends Component {
         this._infoLabel.string = `存活波次: ${wave}\n游戏用时: ${mm}:${ss}`;
         this._infoLabel.lineHeight = 32;
 
+        // 回收所有游戏对象，只保留 UI
+        this._clearGameEntities();
+
         this.node.active = true;
+        this.node.setSiblingIndex(9999);
+    }
+
+    /** 回收敌人、子弹、特效，并隐藏玩家 */
+    private _clearGameEntities(): void {
+        EnemyManager.despawnAll();
+        BulletFactory.despawnAllBullets();
+        VFXManager.instance?.clearAll();
+
+        // 隐藏玩家节点
+        const pc = PlayerController.instance;
+        if (pc && pc.node) {
+            pc.node.active = false;
+        }
     }
 
     private _onRestartClick(_event: EventTouch): void {

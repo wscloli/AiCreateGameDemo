@@ -126,11 +126,11 @@ export class RoguelikeRewardSystem extends Component {
 
     protected onLoad(): void {
         RoguelikeRewardSystem._instance = this;
-        EventBus.on('WAVE_COMPLETE', RoguelikeRewardSystem._onWaveComplete, this);
+        EventBus.on('WAVE_COMPLETE', RoguelikeRewardSystem.onWaveComplete, this);
     }
 
     protected onDestroy(): void {
-        EventBus.off('WAVE_COMPLETE', RoguelikeRewardSystem._onWaveComplete, this);
+        EventBus.off('WAVE_COMPLETE', RoguelikeRewardSystem.onWaveComplete, this);
         RoguelikeRewardSystem._instance = null;
     }
 
@@ -141,11 +141,11 @@ export class RoguelikeRewardSystem extends Component {
     /**
      * 波次完成 → 暂停游戏并生成奖励选项
      */
-    private static _onWaveComplete(payload: { wave: number }): void {
+    public static onWaveComplete(payload: { wave: number }): void {
         if (RoguelikeRewardSystem._isAwaitingChoice) return;
 
         RoguelikeRewardSystem._isAwaitingChoice = true;
-        const options = RoguelikeRewardSystem._drawOptions(3);
+        const options = RoguelikeRewardSystem._drawOptions(3, payload.wave);
         RoguelikeRewardSystem._currentOptions = options.map((mod, idx) => ({ index: idx, modifier: mod }));
 
         // 通知 UI 显示选择面板
@@ -189,8 +189,9 @@ export class RoguelikeRewardSystem extends Component {
 
     /**
      * 随机抽取 N 个选项（不重复，考虑已持有和最大堆叠）
+     * @param wave 波次号，0 表示开局奖励（好奖励概率更低）
      */
-    private static _drawOptions(count: number): ModifierDef[] {
+    private static _drawOptions(count: number, wave: number = 1): ModifierDef[] {
         const available = RoguelikeRewardSystem._getAvailableModifiers();
         if (available.length === 0) {
             // 没有可用修改器时，全给金币/回血（简化处理：给伤害+10%保底）
@@ -205,20 +206,22 @@ export class RoguelikeRewardSystem extends Component {
             const pool = available.filter(m => !usedIds.has(m.id));
             if (pool.length === 0) break;
 
-            const mod = RoguelikeRewardSystem._weightedRandom(pool);
+            const mod = RoguelikeRewardSystem._weightedRandom(pool, wave);
             if (mod) {
                 result.push(mod);
                 usedIds.add(mod.id);
             }
         }
 
-        // 保底机制：每 10 抽至少出现 1 个稀有
-        RoguelikeRewardSystem._totalDraws += count;
-        if (result.every(m => m.rarity === ModifierRarity.COMMON) && RoguelikeRewardSystem._totalDraws >= 10) {
-            const rarePool = available.filter(m => m.rarity !== ModifierRarity.COMMON && !usedIds.has(m.id));
-            if (rarePool.length > 0) {
-                result[result.length - 1] = RoguelikeRewardSystem._weightedRandom(rarePool)!;
-                RoguelikeRewardSystem._totalDraws = 0;
+        // 保底机制：每 10 抽至少出现 1 个稀有（开局奖励 wave=0 不触发保底）
+        if (wave > 0) {
+            RoguelikeRewardSystem._totalDraws += count;
+            if (result.every(m => m.rarity === ModifierRarity.COMMON) && RoguelikeRewardSystem._totalDraws >= 10) {
+                const rarePool = available.filter(m => m.rarity !== ModifierRarity.COMMON && !usedIds.has(m.id));
+                if (rarePool.length > 0) {
+                    result[result.length - 1] = RoguelikeRewardSystem._weightedRandom(rarePool, wave)!;
+                    RoguelikeRewardSystem._totalDraws = 0;
+                }
             }
         }
 
@@ -240,12 +243,11 @@ export class RoguelikeRewardSystem extends Component {
     /**
      * 加权随机抽取
      */
-    private static _weightedRandom(pool: ModifierDef[]): ModifierDef | null {
-        const weights: Record<ModifierRarity, number> = {
-            [ModifierRarity.COMMON]: 70,
-            [ModifierRarity.RARE]: 25,
-            [ModifierRarity.LEGENDARY]: 5,
-        };
+    private static _weightedRandom(pool: ModifierDef[], wave: number = 1): ModifierDef | null {
+        // 开局奖励（wave === 0）大幅降低稀有概率
+        const weights: Record<ModifierRarity, number> = wave === 0
+            ? { [ModifierRarity.COMMON]: 92, [ModifierRarity.RARE]: 7, [ModifierRarity.LEGENDARY]: 1 }
+            : { [ModifierRarity.COMMON]: 70, [ModifierRarity.RARE]: 25, [ModifierRarity.LEGENDARY]: 5 };
 
         const totalWeight = pool.reduce((sum, m) => sum + weights[m.rarity], 0);
         let roll = Math.random() * totalWeight;

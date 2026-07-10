@@ -202,12 +202,14 @@ export class GameManager extends Component {
         EventBus.on('QUERY_ENEMY_POSITIONS', this._onQueryEnemyPositions, this);
         EventBus.on('ENEMY_DIED', this._onEnemyDied, this);
         EventBus.on('PLAYER_DEATH', this._onPlayerDeath, this);
+        EventBus.on('REWARD_SELECTED', this._onRewardSelected, this);
     }
 
     private _unregisterEvents(): void {
         EventBus.off('QUERY_ENEMY_POSITIONS', this._onQueryEnemyPositions, this);
         EventBus.off('ENEMY_DIED', this._onEnemyDied, this);
         EventBus.off('PLAYER_DEATH', this._onPlayerDeath, this);
+        EventBus.off('REWARD_SELECTED', this._onRewardSelected, this);
     }
 
     // ────────────────────────────────
@@ -228,7 +230,8 @@ export class GameManager extends Component {
         EventBus.emit('GAME_START', { timestamp: Date.now() });
         console.log('[GameManager] 游戏开始');
 
-        this.startWave(1);
+        // 开局先弹出初始奖励选择（wave=0，稀有度概率更低）
+        RoguelikeRewardSystem.onWaveComplete({ wave: 0 });
     }
 
     public startWave(waveId: number): void {
@@ -337,6 +340,17 @@ export class GameManager extends Component {
 
     // ────────────────────────────────
     //  事件处理
+    // ────────────────────────────────
+    //  奖励选择
+    // ────────────────────────────────
+
+    private _onRewardSelected(_payload: { modifier: any }): void {
+        if (this._currentWave === 0) {
+            // 初始奖励选择完成后，正式启动第 1 波
+            this.startWave(1);
+        }
+    }
+
     // ────────────────────────────────
 
     private _onQueryEnemyPositions(callback: (enemies: { x: number; y: number }[]) => void): void {
