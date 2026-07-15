@@ -46,6 +46,11 @@ export class WeaponSystem extends Component {
     /** 当前子弹速度（受修改器影响） */
     public currentSpeed: number = 350;
 
+    /** 攻击射程（像素）：只有敌人进入此范围才会发射 */
+    @property
+    public baseAttackRange: number = 350;
+    public currentAttackRange: number = 350;
+
     /** 子弹最大存活时间 */
     @property
     public bulletLifetime: number = 3.0;
@@ -88,14 +93,18 @@ export class WeaponSystem extends Component {
 
     /**
      * 每帧由 GameLoop 调用
-     * 累加冷却计时器，到点发射
+     * 累加冷却计时器，到点且射程内有敌人才发射
      */
     public tick(dt: number): void {
         this._fireTimer += dt;
 
         if (this._fireTimer >= this.currentFireInterval) {
-            this._fireTimer = 0;
-            this._fire();
+            const target = this._findNearestEnemy();
+            if (target && target.distance <= this.currentAttackRange) {
+                this._fireTimer = 0;
+                this._fire(target.direction);
+            }
+            // 射程内无敌人：保持 _fireTimer（不重置），等敌人进入射程立即发射
         }
     }
 
@@ -103,10 +112,7 @@ export class WeaponSystem extends Component {
     //  核心逻辑
     // ────────────────────────────────
 
-    private _fire(): void {
-        const direction = this._findNearestEnemyDirection();
-        if (!direction) return;
-
+    private _fire(direction: Vec2): void {
         // 确定本次发射的元素：队列为空则用 NONE（BasicBullet）
         let element: ElementType = ElementType.NONE;
         if (this._spellQueue.length > 0) {
@@ -145,7 +151,8 @@ export class WeaponSystem extends Component {
         }
     }
 
-    private _findNearestEnemyDirection(): Vec2 | null {
+    /** 查找最近敌人，返回方向和距离 */
+    private _findNearestEnemy(): { direction: Vec2; distance: number } | null {
         let nearestDir: Vec2 | null = null;
         let nearestDist = Infinity;
 
@@ -164,7 +171,8 @@ export class WeaponSystem extends Component {
             }
         });
 
-        return nearestDir;
+        if (!nearestDir) return null;
+        return { direction: nearestDir, distance: nearestDist };
     }
 
     // ────────────────────────────────

@@ -1,26 +1,28 @@
 ﻿/**
  * PlayerController.ts
  *
- * 玩家控制器 - 单指拖拽移动 + 武器系统持有
+ * 玩家控制器 - 虚拟摇杆（左下半屏） + 单指拖拽移动（其余区域）
  *
  * 职责：
- * - 纯单指拖拽控制像素主角移动
+ * - 虚拟摇杆：左下半屏按住拖动控制移动方向
+ * - 单指拖拽：其他区域按住拖拽，角色绝对跟随
  * - 持有 WeaponSystem 引用
  * - 不挂载 Cocos update，由 GameLoop 调用 tick(dt)
  */
 
-import { _decorator, Component, Vec3, input, Input, EventTouch, screen, Canvas, view, Camera, Node } from 'cc';
+import { _decorator, Component, Vec3, Vec2, input, Input, EventTouch, screen, Canvas, view, Camera, Node } from 'cc';
 import { HPBar } from '../UI/HPBar';
 import { EventBus } from '../Core/EventBus';
+import { VirtualJoystick } from './VirtualJoystick';
 
 const { ccclass, property } = _decorator;
 
 /**
- * 玩家控制器 - 单指绝对跟随拖拽
+ * 玩家控制器 - 虚拟摇杆 + 单指绝对跟随拖拽
  *
  * 设计原则：
- * - 手指按下的瞬间记录与角色的偏移量
- * - 拖拽过程中角色严格跟随手指（保持初始偏移）
+ * - 左下半屏：虚拟摇杆控制移动方向（归一化向量）
+ * - 其他区域：单指拖拽，角色绝对跟随手指
  * - 无速度限制、无追赶插值，最大化跟手感
  * - WeaponSystem.tick 由 GameLoop 统一驱动，此处不重复调用
  */
@@ -31,10 +33,24 @@ export class PlayerController extends Component {
     @property
     public moveSmoothing: number = 0.15;
 
+    /** 是否启用拖拽移动（保留代码但可开关） */
+    @property
+    public enableDragMove: boolean = true;
+
+    /** 是否启用虚拟摇杆（保留代码但可开关，当前使用触摸移动时关闭） */
+    @property
+    public useJoystick: boolean = false;
+
     private _targetPosition: Vec3 = new Vec3(0, 0, 0);
     private _isDragging: boolean = false;
     private _dragOffset: Vec3 = new Vec3(0, 0, 0);
     private _camera: Camera | null = null;
+
+    // ── 虚拟摇杆移动 ──
+    /** 摇杆移动速度（世界坐标/秒） */
+    @property
+    public joystickMoveSpeed: number = 380;
+    private _joystickOutput: Vec2 = new Vec2(0, 0);
 
     // ── 生命值系统 ──
     @property
@@ -177,14 +193,45 @@ export class PlayerController extends Component {
     }
 
     public tick(dt: number): void {
+        this._tickJoystickInput();
         this._tickMovement(dt);
     }
 
-    private _tickMovement(_dt: number): void {
-        if (!this._isDragging) return;
+    /** 每帧读取虚拟摇杆输出 */
+    private _tickJoystickInput(): void {
+        if (!this.useJoystick) {
+            this._joystickOutput.set(0, 0);
+            return;
+        }
+        const js = VirtualJoystick.instance;
+        if (js && js.isActive) {
+            this._joystickOutput.set(js.output.x, js.output.y);
+        } else {
+            this._joystickOutput.set(0, 0);
+        }
+    }
 
+    private _tickMovement(_dt: number): void {
         const pos = this.node.position;
         let nextPos: Vec3;
+
+        // 优先虚拟摇杆（仅在 useJoystick 为 true 时生效）
+        if (this.useJoystick && this._joystickOutput.lengthSqr() > 0.0001) {
+            // 使用平滑插值让方向变化更柔和（ Many Widgets 风格）
+            const speed = this.joystickMoveSpeed;
+            const vx = this._joystickOutput.x * speed;
+            const vy = this._joystickOutput.y * speed;
+            nextPos = new Vec3(
+                pos.x + vx * _dt,
+                pos.y + vy * _dt,
+                pos.z,
+            );
+            this.node.setPosition(this._clampPosition(nextPos));
+            return;
+        }
+
+        // 回退到拖拽移动（右半屏或上半屏触摸）
+        if (!this.enableDragMove || !this._isDragging) return;
 
         if (this.moveSmoothing <= 0) {
             // 瞬间跟手
@@ -224,8 +271,22 @@ export class PlayerController extends Component {
         return new Vec3(x, y, 0);
     }
 
+    /**
+     * 检测屏幕坐标是否在虚拟摇杆触发区（左下半屏），避免拖拽与摇杆冲突
+     */
+    private _isInJoystickArea(screenPos: { x: number; y: number }): boolean {
+        const winSize = screen.windowSize;
+        return screenPos.x <= winSize.width / 2 && screenPos.y <= winSize.height / 2;
+    }
+
     private _onTouchStart(event: EventTouch): void {
-        const worldPos = this._screenToWorld(event.getLocation());
+        if (!this.enableDragMove) return;
+
+        const loc = event.getLocation();
+        // 左下半屏留给虚拟摇杆，不启动拖拽
+        if (this._isInJoystickArea(loc)) return;
+
+        const worldPos = this._screenToWorld(loc);
         this._isDragging = true;
 
         // 记录手指与角色的偏移（在世界坐标系中计算）
@@ -237,7 +298,7 @@ export class PlayerController extends Component {
     }
 
     private _onTouchMove(event: EventTouch): void {
-        if (!this._isDragging) return;
+        if (!this.enableDragMove || !this._isDragging) return;
 
         const worldPos = this._screenToWorld(event.getLocation());
         const rawTarget = new Vec3(
@@ -250,10 +311,11 @@ export class PlayerController extends Component {
     }
 
     private _onTouchEnd(_event: EventTouch): void {
+        if (!this.enableDragMove) return;
         this._isDragging = false;
     }
 
     public get isMoving(): boolean {
-        return this._isDragging;
+        return this._isDragging || this._joystickOutput.lengthSqr() > 0.001;
     }
 }

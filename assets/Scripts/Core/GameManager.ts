@@ -7,14 +7,14 @@
  * - 按顺序初始化所有核心系统
  * - 维护游戏状态机（LOADING → PLAYING → GAMEOVER）
  * - 控制 GameLoop 的启动/停止
- * - 波次调度入口
+ * - 波次调度入口（类似土豆兄弟：随时间持续从屏幕外四周生成）
  *
  * 初始化时序：
  * - onLoad: 注册单例、波次配置、事件监听（此时其他组件可能未就绪）
  * - start:  初始化所有核心系统（此时所有组件的 onLoad 已执行完毕）
  */
 
-import { _decorator, Component, Vec3, director } from 'cc';
+import { _decorator, Component, Vec3, director, view } from 'cc';
 import { ElementType } from './ElementReactionHub';
 import { EventBus } from './EventBus';
 import { PoolManager } from './PoolManager';
@@ -36,12 +36,18 @@ export enum GameState {
 
 interface WaveConfig {
     waveId: number;
-    enemyCount: number;
     enemyHp: number;
     enemySpeed: number;
-    spawnInterval: number;
-    spawnRadius: number;
+    spawnInterval: number;      // 生成间隔（秒）
+    spawnRatePerBatch: number;  // 每次同时生成几个
+    maxAlive: number;           // 场上同时存活上限
+    totalQuota: number;         // 本波总生成配额（达到后停止生成）
+    waveDuration: number;       // 波次持续时间（秒），超时强制进入奖励
 }
+
+/** 视口外生成边距（像素）：紧贴屏幕边缘，确保敌人尽快进入视野 */
+const SPAWN_MARGIN_MIN = 20;
+const SPAWN_MARGIN_MAX = 60;
 
 @ccclass('GameManager')
 export class GameManager extends Component {
@@ -71,11 +77,13 @@ export class GameManager extends Component {
     private _currentWave: number = 0;
     private _waveSpawned: number = 0;
     private _waveTimer: number = 0;
+    private _waveElapsedTime: number = 0;
     private _quadtree: Quadtree | null = null;
     private _gameTime: number = 0;
     private _gameLoop: GameLoop | null = null;
     private _systemsInitialized: boolean = false;
 
+    /** true = 波次已结束，正在等待奖励选择 */
     private _nextWavePending: boolean = false;
     private _nextWaveDelay: number = 0;
 
@@ -187,13 +195,26 @@ export class GameManager extends Component {
 
     private _initWaveConfigs(): void {
         for (let i = 1; i <= 20; i++) {
+            // 类似土豆兄弟：越往后波次越密、敌人越强，但生成持续进行
+            // 第1波：超短教学，8只，约4秒出完
+            // 第2波：16只，约6秒出完
+            // 第3波起：正常爬坡
+            const quota = i === 1 ? 8 : (i === 2 ? 16 : 25 + i * 10);
+            const hp = i === 1 ? 20 : (30 + i * 10); // 第1波更脆
+
             this._waveConfigs.push({
                 waveId: i,
-                enemyCount: 5 + i * 3,
-                enemyHp: 30 + i * 10,
-                enemySpeed: 50 + i * 5,
-                spawnInterval: Math.max(0.3, 1.0 - i * 0.03),
-                spawnRadius: 400 + i * 10,
+                enemyHp: hp,
+                enemySpeed: 70 + i * 8,
+                // 第1波出怪快（0.5s），让玩家立刻有反馈
+                spawnInterval: i === 1 ? 0.5 : Math.max(0.2, 0.7 - (i - 1) * 0.03),
+                // 第1波单只，第2波起每2波+1
+                spawnRatePerBatch: i <= 2 ? 1 : 1 + Math.floor((i - 1) / 2),
+                // 第1波场上上限低，避免积压拖节奏
+                maxAlive: i === 1 ? 6 : (i === 2 ? 8 : 10 + i * 2),
+                // 总配额：第1波极少，后面爆发
+                totalQuota: quota,
+                waveDuration: 20 + i * 5,
             });
         }
     }
@@ -244,6 +265,7 @@ export class GameManager extends Component {
         this._currentWave = waveId;
         this._waveSpawned = 0;
         this._waveTimer = 0;
+        this._waveElapsedTime = 0;
 
         EventBus.emit('WAVE_START', { wave: waveId });
         console.log('[GameManager] 第 ' + waveId + ' 波启动');
@@ -255,34 +277,78 @@ export class GameManager extends Component {
     public get quadtree(): Quadtree | null { return this._quadtree; }
 
     // ────────────────────────────────
-    //  波次生成
+    //  波次生成（土豆兄弟式：随时间持续从屏幕外四周生成）
     // ────────────────────────────────
 
     private _tickWaveSpawning(dt: number): void {
         const config = this._waveConfigs[this._currentWave - 1];
-        if (!config || this._waveSpawned >= config.enemyCount) return;
+        if (!config) return;
 
         this._waveTimer += dt;
+        this._waveElapsedTime += dt;
 
-        while (this._waveTimer >= config.spawnInterval && this._waveSpawned < config.enemyCount) {
+        while (this._waveTimer >= config.spawnInterval
+            && this._waveSpawned < config.totalQuota
+            && EnemyManager.aliveCount < config.maxAlive) {
             this._waveTimer -= config.spawnInterval;
-            this._waveSpawned++;
 
-            const angle = Math.random() * Math.PI * 2;
-            const radius = config.spawnRadius + (Math.random() - 0.5) * 100;
-
-            const enemyConfig = this._buildEnemyConfig(this._currentWave, this._waveSpawned, config.enemyCount);
-            EnemyManager.spawnEnemy(
-                enemyConfig,
-                new Vec3(Math.cos(angle) * radius, Math.sin(angle) * radius, 0),
+            const batch = Math.min(
+                config.spawnRatePerBatch,
+                config.totalQuota - this._waveSpawned,
+                config.maxAlive - EnemyManager.aliveCount,
             );
+
+            for (let b = 0; b < batch; b++) {
+                this._waveSpawned++;
+                const pos = this._calcSpawnPositionOutsideViewport();
+                const enemyConfig = this._buildEnemyConfig(this._currentWave, this._waveSpawned, config.totalQuota);
+                EnemyManager.spawnEnemy(enemyConfig, pos);
+            }
         }
+    }
+
+    /**
+     * 在视口四周（屏幕外）随机生成一个生成点
+     * 保证敌人一定在玩家当前视野之外，避免“凭空出现”
+     */
+    private _calcSpawnPositionOutsideViewport(): Vec3 {
+        const designSize = view.getDesignResolutionSize();
+        const halfW = designSize.width / 2;
+        const halfH = designSize.height / 2;
+
+        // 随机选一条边：0=上 1=右 2=下 3=左
+        const edge = Math.floor(Math.random() * 4);
+        const margin = SPAWN_MARGIN_MIN + Math.random() * (SPAWN_MARGIN_MAX - SPAWN_MARGIN_MIN);
+
+        let x = 0;
+        let y = 0;
+
+        switch (edge) {
+            case 0: // 上
+                x = (Math.random() - 0.5) * designSize.width * 2;
+                y = halfH + margin;
+                break;
+            case 1: // 右
+                x = halfW + margin;
+                y = (Math.random() - 0.5) * designSize.height * 2;
+                break;
+            case 2: // 下
+                x = (Math.random() - 0.5) * designSize.width * 2;
+                y = -(halfH + margin);
+                break;
+            case 3: // 左
+                x = -(halfW + margin);
+                y = (Math.random() - 0.5) * designSize.height * 2;
+                break;
+        }
+
+        return new Vec3(x, y, 0);
     }
 
     /**
      * 根据波次和索引构建敌人配置（混合敌人类型）
      */
-    private _buildEnemyConfig(waveNumber: number, index: number, total: number): { maxHp: number; moveSpeed: number; enemyType?: string; elementResist?: ElementType[] } {
+    private _buildEnemyConfig(waveNumber: number, _index: number, _total: number): { maxHp: number; moveSpeed: number; enemyType?: string; elementResist?: ElementType[] } {
         const baseHp = 30 + waveNumber * 10;
         const baseSpeed = 50 + waveNumber * 5;
 
@@ -326,9 +392,10 @@ export class GameManager extends Component {
 
     private _checkWaveComplete(): void {
         const config = this._waveConfigs[this._currentWave - 1];
-        if (!config) return;
+        if (!config || this._nextWavePending) return;
 
-        if (this._waveSpawned >= config.enemyCount && EnemyManager.aliveCount === 0 && !this._nextWavePending) {
+        // 波次结束条件：总配额用完 + 场上敌人全部消灭（不超时强制结束）
+        if (this._waveSpawned >= config.totalQuota && EnemyManager.aliveCount === 0) {
             console.log('[GameManager] 第 ' + this._currentWave + ' 波完成！');
             EventBus.emit('WAVE_COMPLETE', { wave: this._currentWave });
 

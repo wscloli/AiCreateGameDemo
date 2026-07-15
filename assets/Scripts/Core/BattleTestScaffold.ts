@@ -16,6 +16,7 @@ import { GameLoop } from './GameLoop';
 import { VFXManager } from './VFXManager';
 import { EnvironmentManager, ZoneType } from './EnvironmentManager';
 import { PlayerController } from '../Player/PlayerController';
+import { VirtualJoystick } from '../Player/VirtualJoystick';
 import { WeaponSystem } from '../Player/WeaponSystem';
 import { EnemyManager } from '../Enemy/EnemyManager';
 import { EventBus } from './EventBus';
@@ -93,7 +94,7 @@ export class BattleTestScaffold extends Component {
         playerNode.setPosition(new Vec3(0, -200, 0));
 
         const playerUt = playerNode.addComponent(UITransform);
-        playerUt.setContentSize(64, 64);
+        playerUt.setContentSize(48, 48);
 
         const playerSp = playerNode.addComponent(Sprite);
         playerSp.spriteFrame = this._whiteSf;
@@ -103,6 +104,11 @@ export class BattleTestScaffold extends Component {
         const controller = playerNode.addComponent(PlayerController);
         controller.moveSmoothing = 0.0; // 0=瞬间跟手，>0=平滑插值
         controller.initHpBar();
+
+        // 虚拟摇杆（挂在 Canvas 下，确保可见）
+        const jsNode = new Node('VirtualJoystick');
+        canvas.addChild(jsNode);
+        jsNode.addComponent(VirtualJoystick);
 
         const weapon = playerNode.addComponent(WeaponSystem);
         weapon.baseFireInterval = 0.5;
