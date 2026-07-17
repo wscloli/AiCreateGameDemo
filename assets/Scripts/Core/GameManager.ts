@@ -17,6 +17,7 @@
 import { _decorator, Component, Vec3, director, view } from 'cc';
 import { ElementType } from './ElementReactionHub';
 import { EventBus } from './EventBus';
+import { PlayerController } from '../Player/PlayerController';
 import { PoolManager } from './PoolManager';
 import { Quadtree } from './Quadtree';
 import { ElementReactionHub } from './ElementReactionHub';
@@ -308,13 +309,22 @@ export class GameManager extends Component {
     }
 
     /**
-     * 在视口四周（屏幕外）随机生成一个生成点
-     * 保证敌人一定在玩家当前视野之外，避免“凭空出现”
+     * 在玩家当前视野四周（屏幕外）随机生成一个生成点
+     * 相机跟随模式下，以玩家位置为中心计算生成点，保证敌人从视野外进入
      */
     private _calcSpawnPositionOutsideViewport(): Vec3 {
         const designSize = view.getDesignResolutionSize();
         const halfW = designSize.width / 2;
         const halfH = designSize.height / 2;
+
+        // 获取玩家当前位置作为生成中心
+        let centerX = 0;
+        let centerY = 0;
+        if (PlayerController.instance) {
+            const p = PlayerController.instance.node.position;
+            centerX = p.x;
+            centerY = p.y;
+        }
 
         // 随机选一条边：0=上 1=右 2=下 3=左
         const edge = Math.floor(Math.random() * 4);
@@ -325,20 +335,20 @@ export class GameManager extends Component {
 
         switch (edge) {
             case 0: // 上
-                x = (Math.random() - 0.5) * designSize.width * 2;
-                y = halfH + margin;
+                x = centerX + (Math.random() - 0.5) * designSize.width * 2;
+                y = centerY + halfH + margin;
                 break;
             case 1: // 右
-                x = halfW + margin;
-                y = (Math.random() - 0.5) * designSize.height * 2;
+                x = centerX + halfW + margin;
+                y = centerY + (Math.random() - 0.5) * designSize.height * 2;
                 break;
             case 2: // 下
-                x = (Math.random() - 0.5) * designSize.width * 2;
-                y = -(halfH + margin);
+                x = centerX + (Math.random() - 0.5) * designSize.width * 2;
+                y = centerY - (halfH + margin);
                 break;
             case 3: // 左
-                x = -(halfW + margin);
-                y = (Math.random() - 0.5) * designSize.height * 2;
+                x = centerX - (halfW + margin);
+                y = centerY + (Math.random() - 0.5) * designSize.height * 2;
                 break;
         }
 

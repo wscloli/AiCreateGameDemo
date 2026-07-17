@@ -90,8 +90,8 @@
     "_prefab": null,
     "_lpos": {
       "__type__": "cc.Vec3",
-      "x": 640,
-      "y": 360.00000000000006,
+      "x": 375,
+      "y": 667,
       "z": 0
     },
     "_lrot": {
@@ -176,7 +176,7 @@
     "_priority": 1,
     "_fov": 45,
     "_fovAxis": 0,
-    "_orthoHeight": 360,
+    "_orthoHeight": 667,
     "_near": 1,
     "_far": 2000,
     "_color": {
@@ -220,8 +220,8 @@
     "__prefab": null,
     "_contentSize": {
       "__type__": "cc.Size",
-      "width": 1280,
-      "height": 720
+      "width": 750,
+      "height": 1334
     },
     "_anchorPoint": {
       "__type__": "cc.Vec2",
@@ -396,6 +396,11 @@
     "_enabled": true,
     "__prefab": null,
     "moveSmoothing": 0,
+    "enableDragMove": true,
+    "useJoystick": false,
+    "cameraSmoothSpeed": 4.5,
+    "joystickMoveSpeed": 30,
+    "maxHp": 102.8,
     "_id": "4e6qfTiE9IXIEXdnqRQ7Wr"
   },
   {
@@ -411,6 +416,7 @@
     "baseFireInterval": 0.6,
     "baseDamage": 10,
     "baseSpeed": 350,
+    "baseAttackRange": 350,
     "bulletLifetime": 3,
     "_id": "65A8t1XeRBY4XHIdYJMw1q"
   },

@@ -41,6 +41,8 @@ export class VirtualJoystick extends Component {
     private _baseSprite: Sprite | null = null;
     private _center = new Vec3(0, 0, 0);
     private _defaultCenter = new Vec3(0, 0, 0);
+    /** 底座在屏幕上的固定位置（像素坐标），用于抵消相机移动带来的漂移 */
+    private _screenBasePos = new Vec2(0, 0);
 
     protected onLoad(): void {
         VirtualJoystick.instance = this;
@@ -137,8 +139,8 @@ export class VirtualJoystick extends Component {
     }
 
     private _isInArea(sp: { x: number; y: number }): boolean {
-        // 全屏均可触发摇杆（拖拽移动已禁用，无需区分区域）
-        return true;
+        const ws = screen.windowSize;
+        return sp.x <= ws.width / 2 && sp.y <= ws.height / 2;
     }
 
     private _onTouchStart(e: EventTouch): void {
@@ -149,8 +151,9 @@ export class VirtualJoystick extends Component {
         this._fingerId = e.getID();
         this._isActive = true;
 
-        // 底座出现在手指位置
-        const wp = this._screenToWorld(loc);
+        // 记录底座在屏幕上的固定位置，后续根据相机位置实时换算为 Canvas 局部坐标
+        this._screenBasePos.set(loc.x, loc.y);
+        const wp = this._screenToWorld(this._screenBasePos);
         this._center.set(wp);
         this.node.setPosition(this._center);
         this._resetThumb();
@@ -161,8 +164,9 @@ export class VirtualJoystick extends Component {
 
     private _onTouchMove(e: EventTouch): void {
         if (!this._isActive || e.getID() !== this._fingerId) return;
-        const wp = this._screenToWorld(e.getLocation());
-        this._update(wp);
+        const loc = e.getLocation();
+        const wp = this._screenToWorld(loc);
+        this._update(wp, loc);
     }
 
     private _onTouchEnd(e: EventTouch): void {
@@ -176,7 +180,12 @@ export class VirtualJoystick extends Component {
     }
 
     /** 跟随式底座 + 平滑方向 + 小死区 */
-    private _update(fingerWorld: Vec3): void {
+    private _update(fingerWorld: Vec3, fingerScreen: Vec2): void {
+        // 根据当前相机位置重新计算底座 Canvas 局部坐标，抵消相机移动造成的漂移
+        const baseWorld = this._screenToWorld(this._screenBasePos);
+        this._center.set(baseWorld);
+        this.node.setPosition(this._center);
+
         let dx = fingerWorld.x - this._center.x;
         let dy = fingerWorld.y - this._center.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
@@ -195,6 +204,17 @@ export class VirtualJoystick extends Component {
             this._center.x += nx * over;
             this._center.y += ny * over;
             this.node.setPosition(this._center);
+
+            // 底座在屏幕上移动了，同步更新屏幕坐标
+            if (this._camera) {
+                const camPos = this._camera.node.position;
+                const ws = screen.windowSize;
+                const halfH = this._camera.orthoHeight;
+                const halfW = halfH * (ws.width / ws.height);
+                this._screenBasePos.x = ((this._center.x - camPos.x) / (halfW * 2) + 0.5) * ws.width;
+                this._screenBasePos.y = ((this._center.y - camPos.y) / (halfH * 2) + 0.5) * ws.height;
+            }
+
             dx = fingerWorld.x - this._center.x;
             dy = fingerWorld.y - this._center.y;
         }
@@ -215,9 +235,10 @@ export class VirtualJoystick extends Component {
         if (!this._camera || ws.width <= 0 || ws.height <= 0) return new Vec3(0, 0, 0);
         const halfH = this._camera.orthoHeight;
         const halfW = halfH * (ws.width / ws.height);
+        const camPos = this._camera.node.position;
         return new Vec3(
-            (sp.x / ws.width - 0.5) * (halfW * 2),
-            (sp.y / ws.height - 0.5) * (halfH * 2),
+            camPos.x + (sp.x / ws.width - 0.5) * (halfW * 2),
+            camPos.y + (sp.y / ws.height - 0.5) * (halfH * 2),
             0
         );
     }

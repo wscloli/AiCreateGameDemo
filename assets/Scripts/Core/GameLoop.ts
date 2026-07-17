@@ -4,7 +4,7 @@
  * 战斗场景中【唯一的 update 发动机】
  */
 
-import { _decorator, Component, find, Vec3, Node } from 'cc';
+import { _decorator, Component, find, Vec3, Node, Canvas } from 'cc';
 import { PoolManager } from './PoolManager';
 import { GameManager, GameState } from './GameManager';
 import { PlayerController } from '../Player/PlayerController';
@@ -42,6 +42,10 @@ export class GameLoop extends Component {
     @property
     public debugLogInterval: number = 60;
 
+    /** 相机跟随平滑速度（0=瞬间，越大越平滑） */
+    @property
+    public cameraFollowSpeed: number = 5.0;
+
     private _frameCount: number = 0;
     private _playerController: PlayerController | null = null;
     private _weaponSystem: WeaponSystem | null = null;
@@ -50,6 +54,7 @@ export class GameLoop extends Component {
     private _isPaused: boolean = false;
     private _playerResolved: boolean = false;
     private _vfxManager: VFXManager | null = null;
+    private _cameraNode: Node | null = null;
 
     private _debugInfo: FrameDebugInfo = { bulletCount: 0, enemyCount: 0, dt: 0 };
 
@@ -116,6 +121,9 @@ export class GameLoop extends Component {
             // P1: 玩家 + 武器系统
             this._playerController?.tick(safeDt);
             this._weaponSystem?.tick(safeDt);
+
+            // P1.5: 相机跟随玩家（土豆兄弟式：移动 Camera 节点）
+            this._tickCamera(safeDt);
 
             // P2: 敌人移动（先移动，让子弹看到最新位置）
             const enemies = PoolManager.getActiveList(EnemyStatusComponent);
@@ -185,6 +193,33 @@ export class GameLoop extends Component {
 
     public getDebugInfo(): FrameDebugInfo {
         return { ...this._debugInfo };
+    }
+
+    /** 相机跟随玩家：将 Camera 节点的局部坐标平滑插值到玩家位置 */
+    private _tickCamera(dt: number): void {
+        if (!this._playerController) return;
+
+        // 懒加载相机节点
+        if (!this._cameraNode) {
+            const canvas = this.node.scene?.getChildByName('Canvas');
+            if (canvas) {
+                const canvasComp = canvas.getComponent(Canvas) as Canvas;
+                if (canvasComp?.cameraComponent) {
+                    this._cameraNode = canvasComp.cameraComponent.node;
+                }
+            }
+        }
+        if (!this._cameraNode) return;
+
+        const playerPos = this._playerController.node.position;
+        const camPos = this._cameraNode.position;
+
+        // 平滑插值：speed 越大越跟手
+        const t = 1 - Math.exp(-this.cameraFollowSpeed * dt);
+        const targetX = camPos.x + (playerPos.x - camPos.x) * t;
+        const targetY = camPos.y + (playerPos.y - camPos.y) * t;
+
+        this._cameraNode.setPosition(targetX, targetY, camPos.z);
     }
 }
 

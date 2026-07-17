@@ -388,4 +388,65 @@ if (isHitFrame) {
 
 ---
 
-*版本：2026-07-09 | 引擎：Cocos Creator 3.8.6*
+## 十二、相机跟随系统（严格居中）
+
+### 12.1 实现方案
+**需求**：相机严格居中于玩家，保持平滑跟随，不能移出世界边界。
+
+**为什么选严格居中（而非 look-ahead）**：
+- 竖屏单手操作时拇指不会遮挡角色
+- 玩家始终在视野正中心，视野最均衡
+- 割草游戏的敌人在四面八方，居中更利于观察全场
+
+**架构**：
+- 游戏实体（Player、Enemy、Bullet、EnvironmentZone）放在 `WorldContainer` 下
+- UI（HUD、面板）直接挂在 `Canvas` 下（不受相机移动影响）
+- 相机节点移动即可实现跟随，无需移动整个 Canvas
+
+**PlayerController 核心代码**：
+```typescript
+// 目标位置 = 玩家位置（严格居中）
+targetX = pos.x;
+targetY = pos.y;
+
+// 相机边界限制（不能露出世界边界外的黑边）
+targetX = clamp(targetX, -worldHalfWidth + camHalfW, worldHalfWidth - camHalfW);
+targetY = clamp(targetY, -worldHalfHeight + camHalfH, worldHalfHeight - camHalfH);
+
+// 指数平滑（避免瞬间跳动）
+const t = 1 - Math.exp(-smoothSpeed * dt);
+camPos.x += (targetX - camPos.x) * t;
+```
+
+### 12.2 三个关键修正
+
+| 问题 | 原因 | 解决 |
+|-----|------|------|
+| 拖拽时坐标偏移 | `_screenToWorld` 没加相机偏移 | 计算时加上 `cameraNode.position.x/y` |
+| 敌人总在屏幕中心附近生成 | `_calcSpawnPosition` 以 (0,0) 为中心 | 以 `PlayerController.instance.node.position` 为中心 |
+| 相机移出世界边界露出黑边 | 没限制相机位置 | 用 `worldHalf - camHalf` 做边界钳制 |
+
+### 12.3 坐标映射公式（相机跟随模式下）
+```
+屏幕触摸 → 世界坐标：
+worldX = (screenX / winW - 0.5) * (camHalfW * 2) + cameraX
+worldY = (screenY / winH - 0.5) * (camHalfH * 2) + cameraY
+```
+关键：加上 `cameraX/Y` 偏移，否则触摸中心永远映射到世界 (0,0)。
+
+### 12.4 节点层级
+```
+Canvas
+├── WorldContainer          ← 游戏世界（相机跟随目标）
+│   ├── BattleRoot
+│   │   └── Player
+│   └── Enemy_xxx
+├── BattleHUD               ← UI（不跟随相机）
+├── GameOverPanel
+├── RewardSelectionPanel
+└── VirtualJoystick
+```
+
+---
+
+*版本：2026-07-16 | 引擎：Cocos Creator 3.8.6*

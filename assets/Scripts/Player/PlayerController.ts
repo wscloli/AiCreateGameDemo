@@ -37,9 +37,9 @@ export class PlayerController extends Component {
     @property
     public enableDragMove: boolean = true;
 
-    /** 是否启用虚拟摇杆（保留代码但可开关，当前使用触摸移动时关闭） */
+    /** 是否启用虚拟摇杆（保留代码但可开关） */
     @property
-    public useJoystick: boolean = false;
+    public useJoystick: boolean = true;
 
     private _targetPosition: Vec3 = new Vec3(0, 0, 0);
     private _isDragging: boolean = false;
@@ -266,8 +266,9 @@ export class PlayerController extends Component {
         }
         const halfH = this._camera.orthoHeight;
         const halfW = halfH * (winSize.width / winSize.height);
-        const x = (screenPos.x / winSize.width - 0.5) * (halfW * 2);
-        const y = (screenPos.y / winSize.height - 0.5) * (halfH * 2);
+        const camPos = this._camera.node.position;
+        const x = camPos.x + (screenPos.x / winSize.width - 0.5) * (halfW * 2);
+        const y = camPos.y + (screenPos.y / winSize.height - 0.5) * (halfH * 2);
         return new Vec3(x, y, 0);
     }
 
