@@ -7,6 +7,7 @@
 import { _decorator, Component, find, Vec3, Node, Canvas } from 'cc';
 import { PoolManager } from './PoolManager';
 import { GameManager, GameState } from './GameManager';
+import { VirtualJoystick } from '../Player/VirtualJoystick';
 import { PlayerController } from '../Player/PlayerController';
 import { WeaponSystem } from '../Player/WeaponSystem';
 import { EventBus } from './EventBus';
@@ -218,8 +219,24 @@ export class GameLoop extends Component {
         const t = 1 - Math.exp(-this.cameraFollowSpeed * dt);
         const targetX = camPos.x + (playerPos.x - camPos.x) * t;
         const targetY = camPos.y + (playerPos.y - camPos.y) * t;
+        const deltaX = targetX - camPos.x;
+        const deltaY = targetY - camPos.y;
 
         this._cameraNode.setPosition(targetX, targetY, camPos.z);
+
+        // 同步 UI 层位置，抵消相机移动，保持 UI 固定在屏幕上
+        // 注意：所有 UI 节点挂在 Canvas 下，必须用局部坐标
+        const canvas = this.node.scene?.getChildByName('Canvas');
+        if (canvas) {
+            const uiNames = ['BattleHUD', 'GameOverPanel', 'RewardSelectionPanel', 'VirtualJoystick'];
+            for (const name of uiNames) {
+                const n = canvas.getChildByName(name);
+                if (n && n.isValid) {
+                    const p = n.getPosition();
+                    n.setPosition(p.x + deltaX, p.y + deltaY, p.z);
+                }
+            }
+        }
     }
 }
 

@@ -105,7 +105,7 @@ export class BattleTestScaffold extends Component {
         controller.moveSmoothing = 0.0; // 0=瞬间跟手，>0=平滑插值
         controller.initHpBar();
 
-        // 虚拟摇杆（挂在 Canvas 下，确保可见）
+        // 虚拟摇杆（挂在 Canvas 下，GameLoop 会补偿相机移动）
         const jsNode = new Node('VirtualJoystick');
         canvas.addChild(jsNode);
         jsNode.addComponent(VirtualJoystick);

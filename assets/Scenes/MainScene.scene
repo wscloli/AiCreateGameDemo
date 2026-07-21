@@ -398,7 +398,6 @@
     "moveSmoothing": 0,
     "enableDragMove": true,
     "useJoystick": false,
-    "cameraSmoothSpeed": 4.5,
     "joystickMoveSpeed": 30,
     "maxHp": 102.8,
     "_id": "4e6qfTiE9IXIEXdnqRQ7Wr"
@@ -449,6 +448,7 @@
     "playerNodePath": "BattleRoot/TestPlayer",
     "enableDebugLog": true,
     "debugLogInterval": 60,
+    "cameraFollowSpeed": 5,
     "_id": "67oZ16GgtOcZCNVeNalL0E"
   },
   {

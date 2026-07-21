@@ -35,7 +35,7 @@ export class PlayerController extends Component {
 
     /** 是否启用拖拽移动（保留代码但可开关） */
     @property
-    public enableDragMove: boolean = true;
+    public enableDragMove: boolean = false;
 
     /** 是否启用虚拟摇杆（保留代码但可开关） */
     @property
@@ -277,7 +277,7 @@ export class PlayerController extends Component {
      */
     private _isInJoystickArea(screenPos: { x: number; y: number }): boolean {
         const winSize = screen.windowSize;
-        return screenPos.x <= winSize.width / 2 && screenPos.y <= winSize.height / 2;
+        return screenPos.x <= winSize.width / 2;
     }
 
     private _onTouchStart(event: EventTouch): void {

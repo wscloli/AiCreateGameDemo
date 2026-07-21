@@ -3,12 +3,9 @@
  *
  * 虚拟摇杆 UI 组件（浮动底座，左半屏触发）
  *
- * 参考 Many Widgets Joystick2D 方案：
- * - 平时底座淡色显示在左下角作为提示
- * - 左半屏任意位置按下，底座立即跳到手指位置
- * - 平滑连续方向输出（不量化），死区 8px
- * - 恒定速度输出（推离即满速）
- * - 手指抬起后底座回到左下角
+ * - 挂在 Canvas 下，使用世界坐标
+ * - GameLoop._tickCamera 每帧加 delta 补偿相机移动
+ * - _update() 只读取 this.node.position，绝不重新设置底座位置
  */
 
 import { _decorator, Component, Vec3, Vec2, input, Input, EventTouch, screen, Camera, Node, Sprite, SpriteFrame, Texture2D, UITransform, Color, Canvas, director } from 'cc';
@@ -26,9 +23,9 @@ export class VirtualJoystick extends Component {
     @property
     public maxDragDistance: number = 60;
     @property
-    public deadZone: number = 5;           // 死区像素（Many Widgets 通常 3~5）
+    public deadZone: number = 5;
 
-    /** 归一化方向向量（长度恒为 1，或 0 表示在死区内） */
+    /** 归一化方向向量 */
     public output: Vec2 = new Vec2(0, 0);
 
     public get isActive(): boolean { return this._isActive; }
@@ -39,19 +36,20 @@ export class VirtualJoystick extends Component {
     private _baseNode: Node | null = null;
     private _thumbNode: Node | null = null;
     private _baseSprite: Sprite | null = null;
-    private _center = new Vec3(0, 0, 0);
     private _defaultCenter = new Vec3(0, 0, 0);
-    /** 底座在屏幕上的固定位置（像素坐标），用于抵消相机移动带来的漂移 */
-    private _screenBasePos = new Vec2(0, 0);
 
     protected onLoad(): void {
-        VirtualJoystick.instance = this;
-        this._initCamera();
-        this._calcDefaultCenter();
-        this._center.set(this._defaultCenter);
-        this._buildVisuals();
-        this._setVisible(false);
-        this._registerInput();
+        try {
+            VirtualJoystick.instance = this;
+            this._initCamera();
+            this._calcDefaultCenter();
+            this._buildVisuals();
+            this._setVisible(false);
+            this._registerInput();
+            console.log('[VirtualJoystick] onLoad 成功 (build: 2026-07-21-v2)');
+        } catch (e) {
+            console.error('[VirtualJoystick] onLoad 失败:', e);
+        }
     }
 
     protected onDestroy(): void {
@@ -85,7 +83,10 @@ export class VirtualJoystick extends Component {
     }
 
     private _buildVisuals(): void {
-        this.node.setPosition(this._center);
+        this.node.setPosition(this._defaultCenter);
+        if (!this.node.getComponent(UITransform)) {
+            this.node.addComponent(UITransform);
+        }
 
         this._baseNode = new Node('JoystickBase');
         this.node.addChild(this._baseNode);
@@ -139,8 +140,33 @@ export class VirtualJoystick extends Component {
     }
 
     private _isInArea(sp: { x: number; y: number }): boolean {
+        return true;
+    }
+
+    /**
+     * EventTouch -> Canvas 局部坐标。
+     * 策略：以 Camera 节点位置为视口中心，按屏幕像素偏移直接推算 Canvas 局部坐标。
+     * 避开 screenToWorld + convertToNodeSpaceAR 的适配层歧义。
+     */
+    private _eventToLocal(e: EventTouch): Vec3 {
+        if (!this._camera) this._initCamera();
+        if (!this._camera) return new Vec3(0, 0, 0);
+
+        const loc = e.getLocation();     // 左下角原点，逻辑像素
         const ws = screen.windowSize;
-        return sp.x <= ws.width / 2 && sp.y <= ws.height / 2;
+        if (ws.width <= 0 || ws.height <= 0) return new Vec3(0, 0, 0);
+
+        // 像素 -> 世界单位：屏幕高度对应 2*orthoHeight 世界单位
+        const pixelToWorld = (2 * this._camera.orthoHeight) / ws.height;
+
+        // 相对于屏幕中心的偏移（像素）-> 世界单位
+        const offsetX = (loc.x - ws.width * 0.5) * pixelToWorld;
+        const offsetY = (loc.y - ws.height * 0.5) * pixelToWorld;
+
+        // Camera 节点在 Canvas 局部坐标系中的位置（Camera 是 Canvas 子节点）
+        const camPos = this._camera.node.position;
+
+        return new Vec3(camPos.x + offsetX, camPos.y + offsetY, 0);
     }
 
     private _onTouchStart(e: EventTouch): void {
@@ -151,22 +177,19 @@ export class VirtualJoystick extends Component {
         this._fingerId = e.getID();
         this._isActive = true;
 
-        // 记录底座在屏幕上的固定位置，后续根据相机位置实时换算为 Canvas 局部坐标
-        this._screenBasePos.set(loc.x, loc.y);
-        const wp = this._screenToWorld(this._screenBasePos);
-        this._center.set(wp);
-        this.node.setPosition(this._center);
+        const lp = this._eventToLocal(e);
+        this.node.setPosition(lp);
         this._resetThumb();
         this.output.set(0, 0);
 
         this._setVisible(true);
+        console.log('[VirtualJoystick] TouchStart', loc.x, loc.y, 'local:', lp.x, lp.y);
     }
 
     private _onTouchMove(e: EventTouch): void {
         if (!this._isActive || e.getID() !== this._fingerId) return;
-        const loc = e.getLocation();
-        const wp = this._screenToWorld(loc);
-        this._update(wp, loc);
+        const lp = this._eventToLocal(e);
+        this._update(lp);
     }
 
     private _onTouchEnd(e: EventTouch): void {
@@ -175,48 +198,25 @@ export class VirtualJoystick extends Component {
         this._fingerId = -1;
         this.output.set(0, 0);
         this._resetThumb();
-
         this._setVisible(false);
+        console.log('[VirtualJoystick] TouchEnd');
     }
 
-    /** 跟随式底座 + 平滑方向 + 小死区 */
-    private _update(fingerWorld: Vec3, fingerScreen: Vec2): void {
-        // 根据当前相机位置重新计算底座 Canvas 局部坐标，抵消相机移动造成的漂移
-        const baseWorld = this._screenToWorld(this._screenBasePos);
-        this._center.set(baseWorld);
-        this.node.setPosition(this._center);
+    /**
+     * 只计算 thumb 偏移和 output 方向。
+     * 底座位置由 _onTouchStart 初始化 + GameLoop._tickCamera 每帧补偿 delta 来维持固定。
+     * 这里绝不调用 this.node.setPosition()。
+     */
+    private _update(fingerLocal: Vec3): void {
+        const center = this.node.getPosition();
 
-        let dx = fingerWorld.x - this._center.x;
-        let dy = fingerWorld.y - this._center.y;
+        let dx = fingerLocal.x - center.x;
+        let dy = fingerLocal.y - center.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
 
         if (dist < this.deadZone) {
-            // 死区内保持上次方向，不停止移动（割草游戏持续移动体验更佳）
             this._resetThumb();
             return;
-        }
-
-        // 跟随逻辑：手指超出 maxDragDistance 时底座向手指方向平移
-        if (dist > this.maxDragDistance) {
-            const over = dist - this.maxDragDistance;
-            const nx = dx / dist;
-            const ny = dy / dist;
-            this._center.x += nx * over;
-            this._center.y += ny * over;
-            this.node.setPosition(this._center);
-
-            // 底座在屏幕上移动了，同步更新屏幕坐标
-            if (this._camera) {
-                const camPos = this._camera.node.position;
-                const ws = screen.windowSize;
-                const halfH = this._camera.orthoHeight;
-                const halfW = halfH * (ws.width / ws.height);
-                this._screenBasePos.x = ((this._center.x - camPos.x) / (halfW * 2) + 0.5) * ws.width;
-                this._screenBasePos.y = ((this._center.y - camPos.y) / (halfH * 2) + 0.5) * ws.height;
-            }
-
-            dx = fingerWorld.x - this._center.x;
-            dy = fingerWorld.y - this._center.y;
         }
 
         const nx = dx / dist;
@@ -227,20 +227,6 @@ export class VirtualJoystick extends Component {
             const tr = Math.min(dist, this.maxDragDistance) / dist;
             this._thumbNode.setPosition(new Vec3(dx * tr, dy * tr, 0));
         }
-    }
-
-    private _screenToWorld(sp: { x: number; y: number }): Vec3 {
-        if (!this._camera) this._initCamera();
-        const ws = screen.windowSize;
-        if (!this._camera || ws.width <= 0 || ws.height <= 0) return new Vec3(0, 0, 0);
-        const halfH = this._camera.orthoHeight;
-        const halfW = halfH * (ws.width / ws.height);
-        const camPos = this._camera.node.position;
-        return new Vec3(
-            camPos.x + (sp.x / ws.width - 0.5) * (halfW * 2),
-            camPos.y + (sp.y / ws.height - 0.5) * (halfH * 2),
-            0
-        );
     }
 
     private _resetThumb(): void {
