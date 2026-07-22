@@ -4,7 +4,7 @@
  * 战斗场景中【唯一的 update 发动机】
  */
 
-import { _decorator, Component, find, Vec3, Node, Canvas } from 'cc';
+import { _decorator, Component, find, Vec3, Node, Canvas, screen, Camera } from 'cc';
 import { PoolManager } from './PoolManager';
 import { GameManager, GameState } from './GameManager';
 import { VirtualJoystick } from '../Player/VirtualJoystick';
@@ -196,7 +196,7 @@ export class GameLoop extends Component {
         return { ...this._debugInfo };
     }
 
-    /** 相机跟随玩家：将 Camera 节点的局部坐标平滑插值到玩家位置 */
+    /** 相机跟随玩家：将 Camera 节点的局部坐标平滑插值到玩家位置，限制在世界边界内 */
     private _tickCamera(dt: number): void {
         if (!this._playerController) return;
 
@@ -217,8 +217,32 @@ export class GameLoop extends Component {
 
         // 平滑插值：speed 越大越跟手
         const t = 1 - Math.exp(-this.cameraFollowSpeed * dt);
-        const targetX = camPos.x + (playerPos.x - camPos.x) * t;
-        const targetY = camPos.y + (playerPos.y - camPos.y) * t;
+        let targetX = camPos.x + (playerPos.x - camPos.x) * t;
+        let targetY = camPos.y + (playerPos.y - camPos.y) * t;
+
+        // 获取世界边界，限制相机使视口不超出地面
+        let worldHalfW = 1000;
+        let worldHalfH = 1000;
+        try {
+            const gm = GameManager.instance;
+            worldHalfW = gm.worldWidth / 2;
+            worldHalfH = gm.worldHeight / 2;
+        } catch (_e) { /* 使用默认值 */ }
+
+        // 计算相机视口半尺寸（正交相机）
+        let camHalfW = 450;
+        let camHalfH = 800;
+        const camComp = this._cameraNode.getComponent(Camera) as Camera | null;
+        if (camComp && camComp.orthoHeight > 0) {
+            camHalfH = camComp.orthoHeight;
+            const size = screen.windowSize;
+            camHalfW = camHalfH * (size.width / size.height);
+        }
+
+        // 将相机目标位置限制在世界边界减去视口半尺寸内
+        targetX = Math.max(-worldHalfW + camHalfW, Math.min(worldHalfW - camHalfW, targetX));
+        targetY = Math.max(-worldHalfH + camHalfH, Math.min(worldHalfH - camHalfH, targetY));
+
         const deltaX = targetX - camPos.x;
         const deltaY = targetY - camPos.y;
 

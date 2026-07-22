@@ -311,6 +311,7 @@ export class GameManager extends Component {
     /**
      * 在玩家当前视野四周（屏幕外）随机生成一个生成点
      * 相机跟随模式下，以玩家位置为中心计算生成点，保证敌人从视野外进入
+     * 生成后会被钳制在地面边界内，防止敌人出生在黑色区域外
      */
     private _calcSpawnPositionOutsideViewport(): Vec3 {
         const designSize = view.getDesignResolutionSize();
@@ -351,6 +352,12 @@ export class GameManager extends Component {
                 y = centerY + (Math.random() - 0.5) * designSize.height * 2;
                 break;
         }
+
+        // 钳制在地面边界内（留 30 像素边距，避免贴边）
+        const groundHalfW = this.worldWidth / 2 - 30;
+        const groundHalfH = this.worldHeight / 2 - 30;
+        x = Math.max(-groundHalfW, Math.min(groundHalfW, x));
+        y = Math.max(-groundHalfH, Math.min(groundHalfH, y));
 
         return new Vec3(x, y, 0);
     }

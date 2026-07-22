@@ -1,4 +1,4 @@
-﻿/**
+/**
  * BattleTestScaffold.ts
  *
  * 场景运行首测脚手架
@@ -10,7 +10,7 @@
  * - 修复 Canvas 相机：SOLID_COLOR + 所有层可见
  */
 
-import { _decorator, Component, Node, Sprite, SpriteFrame, Texture2D, Color, director, Vec3, Canvas, UITransform } from 'cc';
+import { _decorator, Component, Node, Sprite, SpriteFrame, Texture2D, Color, director, Vec3, Canvas, UITransform, screen, Graphics } from 'cc';
 import { GameManager } from './GameManager';
 import { GameLoop } from './GameLoop';
 import { VFXManager } from './VFXManager';
@@ -58,6 +58,65 @@ export class BattleTestScaffold extends Component {
 
         // 1. 修复 Canvas 相机（Canvas.start() 已执行完毕）
         this._fixCamera(canvas);
+
+        // 地面尺寸 = 视口的 1.5 倍（确保边缘可见黑色外围）
+        const canvasComp = canvas.getComponent(Canvas);
+        const cam = canvasComp?.cameraComponent;
+        let groundW = 800, groundH = 600;
+        if (cam) {
+            const halfH = cam.orthoHeight; // 400
+            const winSize = screen.windowSize;
+            const halfW = halfH * (winSize.width / winSize.height);
+            groundW = halfW * 2 * 1.5; // 视口宽度的 1.5 倍
+            groundH = halfH * 2 * 1.5; // 视口高度的 1.5 倍
+        }
+
+        // 同步更新 GameManager 世界边界
+        const gm = scene.getChildByName('GameRoot')?.getComponent(GameManager);
+        if (gm) {
+            gm.worldWidth = groundW;
+            gm.worldHeight = groundH;
+            console.log('[BattleTestScaffold] 世界边界已更新: ' + groundW + 'x' + groundH);
+        }
+
+        // 外层黑色背景（超大，世界范围外可见为黑色）
+        let outerBg = canvas.getChildByName('OuterBackground');
+        if (!outerBg) {
+            outerBg = new Node('OuterBackground');
+            canvas.insertChild(outerBg, 0);
+            outerBg.setPosition(0, 0, 0);
+            const outUt = outerBg.addComponent(UITransform);
+            outUt.setContentSize(8000, 8000);
+            const outSp = outerBg.addComponent(Sprite);
+            outSp.spriteFrame = this._createColorSpriteFrame(0, 0, 0, 255);
+            outSp.sizeMode = Sprite.SizeMode.CUSTOM;
+            outSp.trim = false;
+        }
+
+        // 内层深蓝灰色地面（角色可移动范围）— 每次启动重新创建
+        let groundNode = canvas.getChildByName('Ground');
+        if (groundNode) {
+            groundNode.destroy(); // 销毁旧节点
+        }
+        groundNode = new Node('Ground');
+        canvas.insertChild(groundNode, 1); // 在黑色背景之上
+        groundNode.setPosition(0, 0, 0);
+
+        const gUt = groundNode.addComponent(UITransform);
+        gUt.setContentSize(groundW, groundH);
+
+        const g = groundNode.addComponent(Graphics);
+        g.fillColor = new Color(26, 26, 46, 255);
+        g.rect(-groundW / 2, -groundH / 2, groundW, groundH);
+        g.fill();
+
+        // 绘制白色边框，明确标识边界
+        g.strokeColor = new Color(60, 60, 90, 255);
+        g.lineWidth = 4;
+        g.rect(-groundW / 2, -groundH / 2, groundW, groundH);
+        g.stroke();
+
+        console.log('[BattleTestScaffold] Ground 已绘制: ' + groundW + 'x' + groundH);
 
         // 挂载 VFXManager
         if (!canvas.getComponent(VFXManager)) {
@@ -277,13 +336,13 @@ export class BattleTestScaffold extends Component {
 
         // Canvas.start() 已运行，修复被覆盖的设置
         cam.clearFlags = 7;           // COLOR | DEPTH | STENCIL — 真正清除屏幕
-        cam.clearColor = new Color(26, 26, 46, 255); // 深色背景
+        cam.clearColor = Color.BLACK; // 纯黑背景（角色运动区域外）
         cam.visibility = 0x7FFFFFFF;  // 所有层
         cam.projection = 1;           // ORTHO
         cam.orthoHeight = 400;
         cam.near = 1;
         cam.far = 2000;
 
-        console.log('[BattleTestScaffold] Canvas 相机已修复: clearFlags=COLOR|DEPTH|STENCIL, visibility=ALL');
+        console.log('[BattleTestScaffold] Canvas 相机已修复: clearFlags=' + cam.clearFlags + ', clearColor=rgb(' + cam.clearColor.r + ',' + cam.clearColor.g + ',' + cam.clearColor.b + '), visibility=ALL');
     }
 }

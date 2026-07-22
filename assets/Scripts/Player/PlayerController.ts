@@ -10,9 +10,10 @@
  * - 不挂载 Cocos update，由 GameLoop 调用 tick(dt)
  */
 
-import { _decorator, Component, Vec3, Vec2, input, Input, EventTouch, screen, Canvas, view, Camera, Node } from 'cc';
+import { _decorator, Component, Vec3, Vec2, input, Input, EventTouch, screen, Canvas, view, Camera, Node, UITransform } from 'cc';
 import { HPBar } from '../UI/HPBar';
 import { EventBus } from '../Core/EventBus';
+import { GameManager } from '../Core/GameManager';
 import { VirtualJoystick } from './VirtualJoystick';
 
 const { ccclass, property } = _decorator;
@@ -157,12 +158,32 @@ export class PlayerController extends Component {
     }
 
     /**
-     * 将坐标钳制在当前相机可视边界内
+     * 获取世界边界（来自 GameManager）
+     *
+     * 注意：BattleTestScaffold 会把 GameRoot 的 parent 改为 Canvas，
+     * 因此不能通过 scene.getChildByName('GameRoot') 查找，
+     * 必须使用 GameManager 单例。
+     */
+    private _getWorldBounds(): { halfW: number; halfH: number } {
+        try {
+            const gm = GameManager.instance;
+            return { halfW: gm.worldWidth / 2, halfH: gm.worldHeight / 2 };
+        } catch (_e) {
+            return { halfW: 600, halfH: 400 };
+        }
+    }
+
+    /**
+     * 将坐标钳制在世界边界内（角色可移动范围）
+     * 留出角色半宽/半高的边距，防止身体露出地面外
      */
     private _clampPosition(pos: Vec3): Vec3 {
-        const { halfW, halfH } = this._getCameraBounds();
-        pos.x = Math.max(-halfW, Math.min(halfW, pos.x));
-        pos.y = Math.max(-halfH, Math.min(halfH, pos.y));
+        const { halfW, halfH } = this._getWorldBounds();
+        const ut = this.node.getComponent(UITransform) as UITransform | null;
+        const playerHalfW = ut ? ut.contentSize.width / 2 : 24;
+        const playerHalfH = ut ? ut.contentSize.height / 2 : 24;
+        pos.x = Math.max(-halfW + playerHalfW, Math.min(halfW - playerHalfW, pos.x));
+        pos.y = Math.max(-halfH + playerHalfH, Math.min(halfH - playerHalfH, pos.y));
         return pos;
     }
 

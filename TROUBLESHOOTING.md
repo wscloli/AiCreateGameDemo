@@ -449,4 +449,60 @@ Canvas
 
 ---
 
-*版本：2026-07-16 | 引擎：Cocos Creator 3.8.6*
+## 十三、世界边界与相机限制（本轮踩坑记录）
+
+### 13.1 虚拟摇杆底座随相机漂移
+**现象**：摇杆底座跟着相机移动，无法固定在触摸点。
+**根因**：[`VirtualJoystick._update()`](assets/Scripts/Player/VirtualJoystick.ts:210) 里调用了 `this.node.setPosition()`，与 [`GameLoop._tickCamera()`](assets/Scripts/Core/GameLoop.ts:200) 的 UI delta 补偿发生写入冲突（两个系统同时改同一个坐标）。
+**解决**：确立「单点写入」原则——只有 GameLoop 负责写摇杆底座位置（补偿相机位移），VirtualJoystick 只读 `this.node.position`，绝不写入。
+
+### 13.2 场景层级搜索失效（反复犯错）
+**现象**：PlayerController 找不到 GameManager，回退到错误的默认边界值。
+**根因**：[`BattleTestScaffold._assemble()`](assets/Scripts/Core/BattleTestScaffold.ts:139) 把 GameRoot 的 parent 改成了 Canvas：
+```typescript
+gameRoot.parent = canvas;
+```
+导致 [`PlayerController._getWorldBounds()`](assets/Scripts/Player/PlayerController.ts:163) 里的 `scene.getChildByName('GameRoot')` 返回 null。
+**解决**：凡是需要访问 GameManager，一律用单例 `GameManager.instance`，禁止通过场景层级搜索（节点 parent 可能在运行时被脚手架或策划调整）。
+
+### 13.3 角色走到边缘露出身体
+**现象**：角色可以走到地面边缘，但 Sprite 一半露在深蓝灰地面外。
+**根因**：[`_clampPosition()`](assets/Scripts/Player/PlayerController.ts:179) 只把节点中心点限制在世界边界内，没考虑 Sprite 尺寸。
+**解决**：clamp 时减去角色半宽/半高：
+```typescript
+const playerHalfW = ut ? ut.contentSize.width / 2 : 24;
+pos.x = Math.max(-halfW + playerHalfW, Math.min(halfW - playerHalfW, pos.x));
+```
+
+### 13.4 相机视口超出地面（看到黑色外围）
+**现象**：玩家走到边缘时，屏幕露出了黑色背景。
+**根因**：相机只跟随玩家，没有限制移动范围，导致视口中心跑到地面外。
+**解决**：[`_tickCamera()`](assets/Scripts/Core/GameLoop.ts:200) 在平滑插值后，将相机目标位置钳制在 `世界边界 - 视口半尺寸` 内：
+```typescript
+targetX = Math.max(-worldHalfW + camHalfW, Math.min(worldHalfW - camHalfW, targetX));
+targetY = Math.max(-worldHalfH + camHalfH, Math.min(worldHalfH - camHalfH, targetY));
+```
+这样相机视野永远只拍摄地面区域。
+
+### 13.5 敌人出生在黑色区域外
+**现象**：屏幕边缘出现了站在黑色背景里的敌人。
+**根因**：[`_calcSpawnPositionOutsideViewport()`](assets/Scripts/Core/GameManager.ts:315) 以玩家为中心在屏幕外生成，玩家靠近边缘时生成点会落在地面外。
+**解决**：生成后再做一次边界钳制，把坐标限制在地面内（留 30px 边距）。
+
+### 13.6 Graphics vs Sprite 绘制地面尺寸
+**现象**：用 Sprite 绘制地面时，实际显示只有 64×64 的小方块。
+**根因**：Sprite 依赖纹理尺寸，默认 SpriteFrame 的纹理只有 64×64；即使调了 `setContentSize()`，如果没有 `sizeMode = CUSTOM` 且先设置 `spriteFrame`，尺寸仍会被覆盖。
+**解决**：地面这种纯色大矩形直接用 [`Graphics`](assets/Scripts/Core/BattleTestScaffold.ts:108) 组件绘制，不受纹理尺寸限制。
+
+### 13.7 坐标系反复横跳（重复错误）
+**现象**：在 Camera-local 和 Canvas-local 坐标之间反复切换，导致摇杆有时看不见、有时位置错乱。
+**根因**：没有理清楚「相机节点移动」和「Canvas 局部坐标」之间的关系，每次遇到 bug 就换一套坐标算法，反而引入新问题。
+**解决**：
+- 所有游戏实体（Player、Enemy、Bullet）统一用 **Canvas 局部坐标**（原点屏幕中心）。
+- 相机移动只是改变视口中心，不改变坐标系原点。
+- UI（摇杆、HUD）挂在 Canvas 下，用 Canvas 局部坐标。
+- 不要试图把 UI 节点挂到 Camera 节点下做「相机跟随」，会导致层级混乱。
+
+---
+
+*版本：2026-07-22 | 引擎：Cocos Creator 3.8.6*
