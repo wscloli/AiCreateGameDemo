@@ -28,6 +28,10 @@ export class RewardSelectionPanel extends Component {
     /** 面板显示后忽略输入的冷却时间（秒），防止波次结束时移动手指的抬升误触卡片 */
     private static readonly _inputCooldown: number = 0.25;
     private _showTime: number = 0;
+    private _selectedIndex: number = -1;
+    private _confirmBtnNode: Node | null = null;
+    private _confirmBtnBg: Graphics | null = null;
+    private _confirmBtnLabel: Label | null = null;
 
     protected onLoad(): void {
         this._buildUI();
@@ -149,10 +153,15 @@ export class RewardSelectionPanel extends Component {
         this.node.setSiblingIndex(9999);
         this._isShowing = true;
         this._showTime = performance.now() / 1000;
+        this._selectedIndex = -1;
 
         // 注册全局输入事件（同时支持触摸和鼠标，绕过 Cocos 节点事件不冒泡的问题）
         input.on(Input.EventType.TOUCH_END, this._onGlobalTouchEnd, this);
         input.on(Input.EventType.MOUSE_UP, this._onGlobalMouseUp, this);
+
+        // 底部确定按钮
+        this._createConfirmButton(halfH);
+
         console.log('[RewardSelectionPanel] 面板已显示，等待选择...');
     }
 
@@ -198,6 +207,21 @@ export class RewardSelectionPanel extends Component {
     }
 
     private _trySelectCard(localX: number, localY: number): void {
+        // 优先检测是否点击了确定按钮
+        if (this._confirmBtnNode && this._confirmBtnNode.active) {
+            const btnPos = this._confirmBtnNode.position;
+            const btnUt = this._confirmBtnNode.getComponent(UITransform);
+            if (btnUt) {
+                const halfBW = btnUt.width / 2;
+                const halfBH = btnUt.height / 2;
+                if (localX >= btnPos.x - halfBW && localX <= btnPos.x + halfBW &&
+                    localY >= btnPos.y - halfBH && localY <= btnPos.y + halfBH) {
+                    this._onConfirmClick();
+                    return;
+                }
+            }
+        }
+
         for (let i = 0; i < this._cardNodes.length; i++) {
             const card = this._cardNodes[i];
             if (!card.isValid) continue;
@@ -211,18 +235,88 @@ export class RewardSelectionPanel extends Component {
 
             if (localX >= cardPos.x - halfW && localX <= cardPos.x + halfW &&
                 localY >= cardPos.y - halfH && localY <= cardPos.y + halfH) {
-                console.log(`[RewardSelectionPanel] 选择了卡片 ${i}`);
-                this._isShowing = false;
-                RoguelikeRewardSystem.selectOption(i);
-                this.node.active = false;
-                this._clearCards();
-                input.off(Input.EventType.TOUCH_END, this._onGlobalTouchEnd, this);
-                input.off(Input.EventType.MOUSE_UP, this._onGlobalMouseUp, this);
-                // 恢复玩家到场景中心
-                this._respawnPlayer();
+                this._selectCard(i);
                 return;
             }
         }
+    }
+
+    private _selectCard(index: number): void {
+        if (this._selectedIndex === index) return;
+
+        // 取消旧选中框
+        if (this._selectedIndex >= 0 && this._selectedIndex < this._cardNodes.length) {
+            const oldCard = this._cardNodes[this._selectedIndex];
+            const oldBorder = oldCard.getChildByName('SelectionBorder');
+            if (oldBorder) oldBorder.active = false;
+        }
+
+        // 设置新选中框
+        this._selectedIndex = index;
+        const newCard = this._cardNodes[index];
+        const newBorder = newCard.getChildByName('SelectionBorder');
+        if (newBorder) newBorder.active = true;
+
+        console.log(`[RewardSelectionPanel] 选中卡片 ${index}`);
+        this._updateConfirmButtonState();
+    }
+
+    private _createConfirmButton(halfH: number): void {
+        const btnNode = new Node('ConfirmButton');
+        this.node.addChild(btnNode);
+        btnNode.setPosition(0, -halfH * 0.62, 0);
+
+        const btnW = 220;
+        const btnH = 64;
+        const btnUt = btnNode.addComponent(UITransform);
+        btnUt.setContentSize(btnW, btnH);
+
+        const bgG = btnNode.addComponent(Graphics);
+        this._confirmBtnBg = bgG;
+
+        const label = this._createLabelOnNode(btnNode, 'ConfirmLabel', new Color(255, 255, 255, 255), 24);
+        label.string = '确定';
+        label.node.setPosition(0, 0, 0);
+        this._confirmBtnLabel = label;
+
+        this._confirmBtnNode = btnNode;
+        this._updateConfirmButtonState();
+    }
+
+    private _updateConfirmButtonState(): void {
+        if (!this._confirmBtnBg || !this._confirmBtnLabel) return;
+        const enabled = this._selectedIndex >= 0;
+        const btnW = 220;
+        const btnH = 64;
+        const halfBW = btnW / 2;
+        const halfBH = btnH / 2;
+
+        this._confirmBtnBg.clear();
+        this._confirmBtnBg.fillColor = enabled ? new Color(60, 140, 60, 255) : new Color(80, 80, 80, 255);
+        this._confirmBtnBg.roundRect(-halfBW, -halfBH, btnW, btnH, 12);
+        this._confirmBtnBg.fill();
+        this._confirmBtnBg.strokeColor = enabled ? new Color(100, 220, 100, 255) : new Color(120, 120, 120, 255);
+        this._confirmBtnBg.lineWidth = 3;
+        this._confirmBtnBg.roundRect(-halfBW, -halfBH, btnW, btnH, 12);
+        this._confirmBtnBg.stroke();
+
+        this._confirmBtnLabel.color = enabled ? new Color(255, 255, 255, 255) : new Color(160, 160, 160, 255);
+    }
+
+    private _onConfirmClick(): void {
+        if (this._selectedIndex < 0) {
+            console.log('[RewardSelectionPanel] 未选择任何奖励，忽略确定');
+            return;
+        }
+        console.log(`[RewardSelectionPanel] 确认选择卡片 ${this._selectedIndex}`);
+        this._isShowing = false;
+        RoguelikeRewardSystem.selectOption(this._selectedIndex);
+        this.node.active = false;
+        this._clearCards();
+        this._selectedIndex = -1;
+        input.off(Input.EventType.TOUCH_END, this._onGlobalTouchEnd, this);
+        input.off(Input.EventType.MOUSE_UP, this._onGlobalMouseUp, this);
+        this._respawnPlayer();
     }
 
     // ────────────────────────────────
@@ -266,8 +360,18 @@ export class RewardSelectionPanel extends Component {
         descLabel.overflow = Label.Overflow.RESIZE_HEIGHT;
         descLabel.getComponent(UITransform)!.setContentSize(cardWidth - 28, halfH * 0.45);
 
-        // 点击检测已移至全局 _onGlobalTouchEnd，卡片本身不再注册 node.on 事件
-        // 原因：Cocos 3.x 节点事件不冒泡，_bgNode/Label 会阻断事件到达卡片
+        // 选中框（默认隐藏）
+        const borderNode = new Node('SelectionBorder');
+        card.addChild(borderNode);
+        borderNode.setPosition(0, 0, 0);
+        const borderUt = borderNode.addComponent(UITransform);
+        borderUt.setContentSize(cardWidth + 10, cardHeight + 10);
+        const borderG = borderNode.addComponent(Graphics);
+        borderG.strokeColor = new Color(255, 220, 80, 255);
+        borderG.lineWidth = 4;
+        borderG.roundRect(-(cardWidth + 10) / 2, -(cardHeight + 10) / 2, cardWidth + 10, cardHeight + 10, 16);
+        borderG.stroke();
+        borderNode.active = false;
 
         return card;
     }
@@ -310,6 +414,13 @@ export class RewardSelectionPanel extends Component {
             }
         }
         this._cardNodes.length = 0;
+        this._selectedIndex = -1;
+        if (this._confirmBtnNode && this._confirmBtnNode.isValid) {
+            this._confirmBtnNode.removeFromParent();
+            this._confirmBtnNode = null;
+            this._confirmBtnBg = null;
+            this._confirmBtnLabel = null;
+        }
     }
 
     /** 回收敌人、子弹、特效，并隐藏玩家 */
