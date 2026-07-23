@@ -228,5 +228,75 @@ const uiNames = ['BattleHUD', 'GameOverPanel', 'RewardSelectionPanel', 'VirtualJ
 
 ---
 
-*文档版本: 2026-07-21*  
-*对应代码版本: build 2026-07-21-v2*
+## 8. 角色移动与相机跟随方案
+
+### 8.1 需求
+
+- 角色通过虚拟摇杆控制移动方向
+- 角色可以走到地面边缘，但不能走出地面（Sprite 完整留在地面内）
+- 相机始终跟随角色，走到边缘时屏幕显示黑色背景
+
+### 8.2 角色移动边界限制
+
+[`PlayerController._clampPosition()`](assets/Scripts/Player/PlayerController.ts:176) 在计算下一帧位置后，将坐标钳制在地面边界减去角色半宽/半高的范围内：
+
+```typescript
+private _clampPosition(pos: Vec3): Vec3 {
+    const { halfW, halfH } = this._getWorldBounds();
+    const ut = this.node.getComponent(UITransform) as UITransform | null;
+    const playerHalfW = ut ? ut.contentSize.width / 2 : 16;
+    const playerHalfH = ut ? ut.contentSize.height / 2 : 16;
+    pos.x = Math.max(-halfW + playerHalfW, Math.min(halfW - playerHalfW, pos.x));
+    pos.y = Math.max(-halfH + playerHalfH, Math.min(halfH - playerHalfH, pos.y));
+    return pos;
+}
+```
+
+**关键点：**
+- 角色中心点不能到达地面边界，必须留出 `playerHalfW/playerHalfH` 的边距
+- 这样 Sprite 的四周始终完整留在地面内，不会露出到黑色区域
+- 世界边界通过 `GameManager.instance` 单例获取（禁止场景层级搜索，因为节点 parent 可能被运行时调整）
+
+### 8.3 相机跟随策略
+
+[`GameLoop._tickCamera()`](assets/Scripts/Core/GameLoop.ts:200) 只做平滑插值跟随玩家，**不限制相机边界**：
+
+```typescript
+// 平滑插值：speed 越大越跟手
+const t = 1 - Math.exp(-this.cameraFollowSpeed * dt);
+let targetX = camPos.x + (playerPos.x - camPos.x) * t;
+let targetY = camPos.y + (playerPos.y - camPos.y) * t;
+
+// 不限制相机边界：角色走到边缘时，视野露出黑色背景
+this._cameraNode.setPosition(targetX, targetY, camPos.z);
+```
+
+**与之前策略的区别：**
+- ❌ 旧策略：相机也限制在世界边界内，导致角色走到边缘时画面被"推"回来，摇杆手感像被掐住
+- ✅ 新策略：相机自由跟随，角色贴到边界时画面自然露出黑色，玩家明确感知到"走到头了"
+
+### 8.4 踩坑历史（角色移动与边界）
+
+| 问题 | 原因 | 解决 |
+|------|------|------|
+| 角色不能走到边缘 | `_getWorldBounds()` 用 `scene.getChildByName('GameRoot')` 查找，但 BattleTestScaffold 把 GameRoot parent 改成了 Canvas | 改用 `GameManager.instance` 单例 |
+| 角色走到边缘露出一半身体 | `_clampPosition()` 只限制中心点，没减 Sprite 半宽 | 减去 `contentSize.width/2` 边距 |
+| 摇杆推到边缘像被掐住 | 相机也限制了边界，角色停 → 相机停 → 画面冻结 | 删除相机边界限制，让视野露出黑色 |
+| 角色直接走出地面 | 删除了 `_clampPosition()` 的所有限制 | 恢复 clamp，但保留角色半宽边距 |
+
+### 8.5 当前最终行为
+
+1. 摇杆推到底 → 角色持续向该方向移动
+2. 角色中心到达 `地面边界 - 半宽` 时停止
+3. Sprite 完整留在地面内，不露出黑色区域
+4. 相机继续跟随角色中心，画面边缘自然显示黑色背景
+5. 玩家明确感知到"走到边界了"，但摇杆输入没有被切断
+
+---
+
+**角色尺寸：** 运行时创建的 Player 节点为 `32×32`（[`BattleTestScaffold.ts`](assets/Scripts/Core/BattleTestScaffold.ts:156)），若后续需要调整，同步修改 `playerUt.setContentSize()`。
+
+---
+
+*文档版本: 2026-07-23*
+*对应代码版本: build 2026-07-23*

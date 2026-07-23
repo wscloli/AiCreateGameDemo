@@ -7,7 +7,7 @@
  * 监听事件：WAVE_START, ENEMY_DIED, GAME_START
  */
 
-import { _decorator, Component, Node, Label, Color, UITransform } from 'cc';
+import { _decorator, Component, Node, Label, Color, UITransform, view, screen, Canvas } from 'cc';
 import { EventBus } from '../Core/EventBus';
 import { GameManager } from '../Core/GameManager';
 import { RoguelikeRewardSystem } from '../Player/RoguelikeRewardSystem';
@@ -59,38 +59,63 @@ export class BattleHUD extends Component {
         this.node.parent = canvas;
         this.node.setSiblingIndex(999);
 
+        // 以当前相机视口为基准计算安全区域，避免设计分辨率与实际视口不一致导致溢出或消失
+        const canvasComp = canvas.getComponent(Canvas);
+        const cam = canvasComp?.cameraComponent;
+        const ws = screen.windowSize;
+        let halfW = 400;
+        let halfH = 400;
+        if (cam && ws.width > 0 && ws.height > 0) {
+            halfH = cam.orthoHeight;
+            halfW = halfH * (ws.width / ws.height);
+        } else {
+            // 相机未就绪时回退到设计分辨率
+            const designSize = view.getDesignResolutionSize();
+            halfW = designSize.width / 2;
+            halfH = designSize.height / 2;
+        }
+
+        const marginX = Math.min(halfW * 0.08, 48);
+        const marginY = Math.min(halfH * 0.08, 48);
+        const topY = halfH - marginY;
+        const bottomY = -halfH + marginY;
+
         // 波次标签（左上角）
-        this._waveLabel = this._createLabel('WaveLabel', new Color(255, 255, 255, 255));
-        this._waveLabel.node.setPosition(-280, 350, 0);
+        this._waveLabel = this._createLabel('WaveLabel', new Color(255, 255, 255, 255), 0, 1);
+        this._waveLabel.node.setPosition(-halfW + marginX, topY, 0);
         this._waveLabel.fontSize = 28;
         this._waveLabel.lineHeight = 32;
+        this._waveLabel.horizontalAlign = Label.HorizontalAlign.LEFT;
 
         // 计时器标签（顶部居中）
-        this._timerLabel = this._createLabel('TimerLabel', new Color(200, 220, 255, 255));
-        this._timerLabel.node.setPosition(0, 350, 0);
+        this._timerLabel = this._createLabel('TimerLabel', new Color(200, 220, 255, 255), 0.5, 1);
+        this._timerLabel.node.setPosition(0, topY, 0);
         this._timerLabel.fontSize = 24;
         this._timerLabel.lineHeight = 28;
 
         // 击杀标签（右上角）
-        this._killLabel = this._createLabel('KillLabel', new Color(255, 100, 100, 255));
-        this._killLabel.node.setPosition(280, 350, 0);
+        this._killLabel = this._createLabel('KillLabel', new Color(255, 100, 100, 255), 1, 1);
+        this._killLabel.node.setPosition(halfW - marginX, topY, 0);
         this._killLabel.fontSize = 24;
         this._killLabel.lineHeight = 28;
+        this._killLabel.horizontalAlign = Label.HorizontalAlign.RIGHT;
 
         // 修改器摘要（左下角）
-        this._modifierLabel = this._createLabel('ModifierLabel', new Color(180, 255, 180, 255));
-        this._modifierLabel.node.setPosition(-280, -350, 0);
+        this._modifierLabel = this._createLabel('ModifierLabel', new Color(180, 255, 180, 255), 0, 0);
+        this._modifierLabel.node.setPosition(-halfW + marginX, bottomY, 0);
         this._modifierLabel.fontSize = 18;
         this._modifierLabel.lineHeight = 22;
         this._modifierLabel.horizontalAlign = Label.HorizontalAlign.LEFT;
     }
 
-    private _createLabel(name: string, color: Color): Label {
+    private _createLabel(name: string, color: Color, anchorX: number = 0.5, anchorY: number = 0.5): Label {
         const node = new Node(name);
         this.node.addChild(node);
 
         const ut = node.addComponent(UITransform);
-        ut.setContentSize(300, 40);
+        ut.setContentSize(300, 50);
+        ut.anchorX = anchorX;
+        ut.anchorY = anchorY;
 
         const label = node.addComponent(Label);
         label.color = color;

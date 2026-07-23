@@ -7,7 +7,7 @@
  * 派发：RoguelikeRewardSystem.selectOption(index)
  */
 
-import { _decorator, Component, Node, Label, Color, UITransform, Graphics, EventTouch, EventMouse, input, Input, view, screen } from 'cc';
+import { _decorator, Component, Node, Label, Color, UITransform, Graphics, EventTouch, EventMouse, input, Input, view, screen, Canvas, Vec3 } from 'cc';
 import { EventBus } from '../Core/EventBus';
 import { RoguelikeRewardSystem, RewardOption, ModifierRarity } from '../Player/RoguelikeRewardSystem';
 import { EnemyManager } from '../Enemy/EnemyManager';
@@ -23,6 +23,11 @@ export class RewardSelectionPanel extends Component {
     private _titleLabel: Label | null = null;
     private _cardNodes: Node[] = [];
     private _isShowing: boolean = false;
+    private _panelW: number = 800;
+    private _panelH: number = 800;
+    /** 面板显示后忽略输入的冷却时间（秒），防止波次结束时移动手指的抬升误触卡片 */
+    private static readonly _inputCooldown: number = 0.25;
+    private _showTime: number = 0;
 
     protected onLoad(): void {
         this._buildUI();
@@ -45,19 +50,37 @@ export class RewardSelectionPanel extends Component {
         this.node.parent = canvas;
         this.node.setSiblingIndex(9999);
 
+        // 以当前相机视口为基准，确保遮罩和卡片布局在不同分辨率下都可见且不溢出
+        const canvasComp = canvas.getComponent(Canvas);
+        const cam = canvasComp?.cameraComponent;
+        const ws = screen.windowSize;
+        let halfW = 400;
+        let halfH = 400;
+        if (cam && ws.width > 0 && ws.height > 0) {
+            halfH = cam.orthoHeight;
+            halfW = halfH * (ws.width / ws.height);
+        } else {
+            const designSize = view.getDesignResolutionSize();
+            halfW = designSize.width / 2;
+            halfH = designSize.height / 2;
+        }
+
+        this._panelW = halfW * 2;
+        this._panelH = halfH * 2;
+
         // 全屏不透明遮罩，彻底盖住角色和敌人
         this._bgNode = new Node('BG');
         this.node.addChild(this._bgNode);
         const bgUt = this._bgNode.addComponent(UITransform);
-        bgUt.setContentSize(800, 600);
+        bgUt.setContentSize(this._panelW, this._panelH);
         const bgG = this._bgNode.addComponent(Graphics);
         bgG.fillColor = new Color(0, 0, 0, 230);
-        bgG.rect(-400, -300, 800, 600);
+        bgG.rect(-halfW, -halfH, this._panelW, this._panelH);
         bgG.fill();
 
-        // 标题
+        // 标题（距顶部 12% 视口高度）
         this._titleLabel = this._createLabel('Title', new Color(255, 220, 100, 255), 36);
-        this._titleLabel.node.setPosition(0, 220, 0);
+        this._titleLabel.node.setPosition(0, halfH * 0.78, 0);
         this._titleLabel.string = '选择奖励';
 
         // 初始隐藏
@@ -92,19 +115,40 @@ export class RewardSelectionPanel extends Component {
         // 回收所有敌人和子弹，防止干扰选择
         this._clearGameEntities();
 
-        const spacing = 260;
-        const startX = -((payload.options.length - 1) * spacing) / 2;
+        // 以相机视口为基准计算卡片布局，确保不超出屏幕
+        const canvas = this.node.scene?.getChildByName('Canvas');
+        const canvasComp = canvas?.getComponent(Canvas);
+        const cam = canvasComp?.cameraComponent;
+        const ws = screen.windowSize;
+        let halfW = this._panelW / 2;
+        let halfH = this._panelH / 2;
+        if (cam && ws.width > 0 && ws.height > 0) {
+            halfH = cam.orthoHeight;
+            halfW = halfH * (ws.width / ws.height);
+        }
 
-        for (let i = 0; i < payload.options.length; i++) {
+        const cardCount = payload.options.length;
+        // 卡片更宽松：占满可用横向空间，纵向占视口 55%
+        const maxCardW = (halfW * 2) / cardCount;
+        const maxCardH = halfH * 2 * 0.55;
+        const cardWidth = Math.min(260, maxCardW * 0.86);
+        const cardHeight = Math.min(260, maxCardH * 0.86);
+        const spacing = cardWidth + Math.min(32, halfW * 0.08);
+        const totalWidth = (cardCount - 1) * spacing;
+        const startX = -totalWidth / 2;
+        const cardY = -halfH * 0.04;
+
+        for (let i = 0; i < cardCount; i++) {
             const opt = payload.options[i];
-            const card = this._createCard(opt, i);
-            card.setPosition(startX + i * spacing, 0, 0);
+            const card = this._createCard(opt, i, cardWidth, cardHeight);
+            card.setPosition(startX + i * spacing, cardY, 0);
             this._cardNodes.push(card);
         }
 
         this.node.active = true;
         this.node.setSiblingIndex(9999);
         this._isShowing = true;
+        this._showTime = performance.now() / 1000;
 
         // 注册全局输入事件（同时支持触摸和鼠标，绕过 Cocos 节点事件不冒泡的问题）
         input.on(Input.EventType.TOUCH_END, this._onGlobalTouchEnd, this);
@@ -117,27 +161,40 @@ export class RewardSelectionPanel extends Component {
      * 原因：Cocos 3.x 节点事件不冒泡，_bgNode/Label 会拦截卡片事件，导致卡片 on(TOUCH_END) 无法触发
      */
     private _onGlobalTouchEnd(event: EventTouch): void {
-        if (!this._isShowing) return;
-        const touchPos = event.getUILocation();
-        const designSize = view.getDesignResolutionSize();
-        // UI 坐标 → this.node 局部坐标（this.node 在 Canvas 中心）
-        const localX = touchPos.x - designSize.width / 2;
-        const localY = designSize.height / 2 - touchPos.y;
-        this._trySelectCard(localX, localY);
+        if (!this._isShowing || this._isInCooldown()) return;
+        // 使用 Cocos 内置坐标转换，避免 UI 坐标系与 panel 尺寸不一致导致偏移
+        const localPos = this._convertToLocal(event.getUILocation());
+        this._trySelectCard(localPos.x, localPos.y);
     }
 
     private _onGlobalMouseUp(event: EventMouse): void {
-        if (!this._isShowing) return;
+        if (!this._isShowing || this._isInCooldown()) return;
+        // 鼠标屏幕坐标 → UI 坐标（左下角原点）
         const screenLoc = event.getLocation();
         const screenSize = screen.windowSize;
-        const designSize = view.getDesignResolutionSize();
-        // 屏幕像素 → UI 坐标（左下角原点）
-        const uiX = screenLoc.x * (designSize.width / screenSize.width);
-        const uiY = (screenSize.height - screenLoc.y) * (designSize.height / screenSize.height);
-        // UI 坐标 → this.node 局部坐标
-        const localX = uiX - designSize.width / 2;
-        const localY = designSize.height / 2 - uiY;
-        this._trySelectCard(localX, localY);
+        const uiPos = {
+            x: screenLoc.x * (this._panelW / screenSize.width),
+            y: (screenSize.height - screenLoc.y) * (this._panelH / screenSize.height),
+        };
+        const localPos = this._convertToLocal(uiPos);
+        this._trySelectCard(localPos.x, localPos.y);
+    }
+
+    /** 面板刚显示时忽略输入，避免移动手指的释放事件误选奖励 */
+    private _isInCooldown(): boolean {
+        const elapsed = (performance.now() / 1000) - this._showTime;
+        return elapsed < RewardSelectionPanel._inputCooldown;
+    }
+
+    /**
+     * 将 UI 坐标（左下角原点）转换为 this.node 局部坐标。
+     * 这里使用节点自身的 UITransform.convertToNodeSpaceAR，与 Cocos 适配层保持一致。
+     */
+    private _convertToLocal(uiPos: { x: number; y: number }): { x: number; y: number } {
+        const out = new Vec3();
+        // UI 坐标是 Vec3（z=0），传入 convertToNodeSpaceAR 得到局部坐标
+        this.node.getComponent(UITransform)?.convertToNodeSpaceAR(new Vec3(uiPos.x, uiPos.y, 0), out);
+        return { x: out.x, y: out.y };
     }
 
     private _trySelectCard(localX: number, localY: number): void {
@@ -172,40 +229,42 @@ export class RewardSelectionPanel extends Component {
     //  卡片创建
     // ────────────────────────────────
 
-    private _createCard(option: RewardOption, index: number): Node {
+    private _createCard(option: RewardOption, index: number, cardWidth: number = 220, cardHeight: number = 300): Node {
         const card = new Node(`Card_${index}`);
         this.node.addChild(card);
 
+        const halfW = cardWidth / 2;
+        const halfH = cardHeight / 2;
         const cardUt = card.addComponent(UITransform);
-        cardUt.setContentSize(220, 300);
+        cardUt.setContentSize(cardWidth, cardHeight);
 
         // 卡片背景
         const rarityColor = this._getRarityColor(option.modifier.rarity);
         const g = card.addComponent(Graphics);
         g.fillColor = new Color(40, 40, 60, 240);
-        g.roundRect(-110, -150, 220, 300, 12);
+        g.roundRect(-halfW, -halfH, cardWidth, cardHeight, 12);
         g.fill();
         g.strokeColor = rarityColor;
         g.lineWidth = 3;
-        g.roundRect(-110, -150, 220, 300, 12);
+        g.roundRect(-halfW, -halfH, cardWidth, cardHeight, 12);
         g.stroke();
 
-        // 稀有度标签
-        const rarityLabel = this._createLabelOnNode(card, 'Rarity', rarityColor, 18);
-        rarityLabel.node.setPosition(0, 120, 0);
+        // 稀有度标签（距顶部 18%）
+        const rarityLabel = this._createLabelOnNode(card, 'Rarity', rarityColor, 16);
+        rarityLabel.node.setPosition(0, halfH * 0.78, 0);
         rarityLabel.string = this._getRarityText(option.modifier.rarity);
 
-        // 名称
-        const nameLabel = this._createLabelOnNode(card, 'Name', new Color(255, 255, 255, 255), 24);
-        nameLabel.node.setPosition(0, 80, 0);
+        // 名称（距顶部 38%）
+        const nameLabel = this._createLabelOnNode(card, 'Name', new Color(255, 255, 255, 255), 22);
+        nameLabel.node.setPosition(0, halfH * 0.48, 0);
         nameLabel.string = option.modifier.name;
 
-        // 描述
-        const descLabel = this._createLabelOnNode(card, 'Desc', new Color(200, 200, 200, 255), 18);
-        descLabel.node.setPosition(0, 20, 0);
+        // 描述（居中偏下）
+        const descLabel = this._createLabelOnNode(card, 'Desc', new Color(200, 200, 200, 255), 16);
+        descLabel.node.setPosition(0, -halfH * 0.12, 0);
         descLabel.string = option.modifier.description;
         descLabel.overflow = Label.Overflow.RESIZE_HEIGHT;
-        descLabel.getComponent(UITransform)!.setContentSize(180, 80);
+        descLabel.getComponent(UITransform)!.setContentSize(cardWidth - 28, halfH * 0.45);
 
         // 点击检测已移至全局 _onGlobalTouchEnd，卡片本身不再注册 node.on 事件
         // 原因：Cocos 3.x 节点事件不冒泡，_bgNode/Label 会阻断事件到达卡片
@@ -217,11 +276,11 @@ export class RewardSelectionPanel extends Component {
         const node = new Node(name);
         parent.addChild(node);
         const ut = node.addComponent(UITransform);
-        ut.setContentSize(200, 40);
+        ut.setContentSize(240, 40);
         const label = node.addComponent(Label);
         label.color = color;
         label.fontSize = fontSize;
-        label.lineHeight = fontSize + 4;
+        label.lineHeight = fontSize + 6;
         label.string = '';
         return label;
     }

@@ -153,7 +153,7 @@ export class BattleTestScaffold extends Component {
         playerNode.setPosition(new Vec3(0, -200, 0));
 
         const playerUt = playerNode.addComponent(UITransform);
-        playerUt.setContentSize(48, 48);
+        playerUt.setContentSize(32, 32);
 
         const playerSp = playerNode.addComponent(Sprite);
         playerSp.spriteFrame = this._whiteSf;
