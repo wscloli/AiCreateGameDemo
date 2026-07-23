@@ -174,8 +174,10 @@ export class PlayerController extends Component {
     }
 
     /**
-     * 将坐标钳制在世界边界内（角色可移动范围）
-     * 留出角色半宽/半高的边距，防止身体露出地面外
+     * 将坐标钳制在世界边界内（角色完整 Sprite 不露出地面）
+     *
+     * 角色中心减去半宽/半高，确保 Sprite 四周完整留在地面内。
+     * 相机不设边界限制，走到边缘时屏幕显示黑色背景。
      */
     private _clampPosition(pos: Vec3): Vec3 {
         const { halfW, halfH } = this._getWorldBounds();

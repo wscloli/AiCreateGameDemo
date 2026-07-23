@@ -220,28 +220,8 @@ export class GameLoop extends Component {
         let targetX = camPos.x + (playerPos.x - camPos.x) * t;
         let targetY = camPos.y + (playerPos.y - camPos.y) * t;
 
-        // 获取世界边界，限制相机使视口不超出地面
-        let worldHalfW = 1000;
-        let worldHalfH = 1000;
-        try {
-            const gm = GameManager.instance;
-            worldHalfW = gm.worldWidth / 2;
-            worldHalfH = gm.worldHeight / 2;
-        } catch (_e) { /* 使用默认值 */ }
-
-        // 计算相机视口半尺寸（正交相机）
-        let camHalfW = 450;
-        let camHalfH = 800;
-        const camComp = this._cameraNode.getComponent(Camera) as Camera | null;
-        if (camComp && camComp.orthoHeight > 0) {
-            camHalfH = camComp.orthoHeight;
-            const size = screen.windowSize;
-            camHalfW = camHalfH * (size.width / size.height);
-        }
-
-        // 将相机目标位置限制在世界边界减去视口半尺寸内
-        targetX = Math.max(-worldHalfW + camHalfW, Math.min(worldHalfW - camHalfW, targetX));
-        targetY = Math.max(-worldHalfH + camHalfH, Math.min(worldHalfH - camHalfH, targetY));
+        // 相机不限制边界：跟随玩家直到视野露出黑色外围
+        // （角色可以走出地面，视野外显示黑色背景）
 
         const deltaX = targetX - camPos.x;
         const deltaY = targetY - camPos.y;
