@@ -194,6 +194,59 @@ node.on(Node.EventType.TOUCH_END, this._onGlobalTouchEnd, this);
 input.on(Input.EventType.MOUSE_UP, this._onGlobalMouseUp, this);
 ```
 
+### 5.4 动态 UI 节点触摸处理最佳实践（重要教训）
+
+2026-07-24 修复 `RewardSelectionPanel` 点击失效时总结：
+
+#### 问题现象
+- 奖励选择面板显示正常，但卡片和确定按钮完全无法点击。
+- 卡片/按钮使用 `card.on(Node.EventType.TOUCH_END)` 注册节点级事件，但点击后回调不被触发。
+- 改用全局 `input.on(Input.EventType.TOUCH_END)` 后回调能收到，但命中检测始终失败。
+
+#### 根因
+1. **节点级 UI 事件对动态创建节点不可靠**：Cocos UI 事件分发依赖 `UITransform`、层级、Camera 事件相机等配置。`RewardSelectionPanel` 是代码动态创建的，节点级事件未正确分发到卡片。
+2. **坐标系转换错误**：全局 `input` 的 `event.getLocation()` 返回的是**屏幕像素坐标**（左下角原点），但之前直接把它传给了 `UITransform.convertToNodeSpaceAR()`，该 API 期望的是**世界坐标/父节点局部坐标**，导致转换结果完全错误。
+3. **项目特殊坐标环境**：当前项目 Camera 会跟随玩家移动，UI 节点（包括 `RewardSelectionPanel`）在 `GameLoop._tickCamera()` 中会随 Camera 同步偏移。因此不能假设 UI 节点固定在 `(0,0)`，必须用 Camera 当前位置参与转换。
+
+#### 正确做法
+使用全局 input 并手动完成屏幕像素 → 面板局部坐标的转换：
+
+```typescript
+private _screenToPanelLocal(screenPos: { x: number; y: number }): Vec3 | null {
+    const canvas = this.node.parent;
+    if (!canvas) return null;
+    const canvasComp = canvas.getComponent(Canvas);
+    const cam = canvasComp?.cameraComponent;
+    if (!cam) return null;
+
+    const ws = screen.windowSize;
+    if (ws.width <= 0 || ws.height <= 0) return null;
+
+    // 屏幕像素 → 归一化坐标 [-1, 1]
+    const nx = (screenPos.x / ws.width - 0.5) * 2;
+    const ny = (screenPos.y / ws.height - 0.5) * 2;
+
+    // 相机当前可视半宽高（世界单位）
+    const halfH = cam.orthoHeight;
+    const halfW = halfH * (ws.width / ws.height);
+
+    // 触摸点世界坐标 = 相机位置 + 归一化偏移 * 半宽高
+    // 面板局部坐标 = 世界坐标 - 面板节点局部位置
+    const panelPos = this.node.getPosition();
+    return new Vec3(
+        cam.node.position.x + nx * halfW - panelPos.x,
+        cam.node.position.y + ny * halfH - panelPos.y,
+        0,
+    );
+}
+```
+
+#### 调试 checklist（以后必须按此顺序执行）
+1. **先确认事件到达**：在回调第一行加 `console.log`。
+2. **再确认坐标转换正确**：打印屏幕像素坐标、转换后的面板局部坐标、目标卡片/按钮的中心和半宽高。
+3. **最后做命中检测**：只有前两步都对，命中检测才有意义。
+4. **不要反复切换事件类型**：如果事件根本未分发，换 `TOUCH_START`/`TOUCH_END`/`MOUSE_UP` 都无法解决。
+
 ---
 
 ## 六、子弹系统

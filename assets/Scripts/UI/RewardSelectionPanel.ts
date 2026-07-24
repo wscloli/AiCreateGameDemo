@@ -7,7 +7,7 @@
  * 派发：RoguelikeRewardSystem.selectOption(index)
  */
 
-import { _decorator, Component, Node, Label, Color, UITransform, Graphics, EventTouch, EventMouse, input, Input, view, screen, Canvas, Vec3 } from 'cc';
+import { _decorator, Component, Node, Label, Color, UITransform, Graphics, view, screen, Canvas, Vec3, input, Input } from 'cc';
 import { EventBus } from '../Core/EventBus';
 import { RoguelikeRewardSystem, RewardOption, ModifierRarity } from '../Player/RoguelikeRewardSystem';
 import { EnemyManager } from '../Enemy/EnemyManager';
@@ -36,12 +36,15 @@ export class RewardSelectionPanel extends Component {
     protected onLoad(): void {
         this._buildUI();
         EventBus.on('REWARD_SHOW', this._onRewardShow, this);
+        // 屏蔽全局触摸输入，防止 PlayerController / VirtualJoystick 在奖励界面处理触摸
+        input.on(Input.EventType.TOUCH_START, this._onPanelTouchStart, this);
+        input.on(Input.EventType.TOUCH_END, this._onPanelTouchEnd, this);
     }
 
     protected onDestroy(): void {
         EventBus.off('REWARD_SHOW', this._onRewardShow, this);
-        input.off(Input.EventType.TOUCH_END, this._onGlobalTouchEnd, this);
-        input.off(Input.EventType.MOUSE_UP, this._onGlobalMouseUp, this);
+        input.off(Input.EventType.TOUCH_START, this._onPanelTouchStart, this);
+        input.off(Input.EventType.TOUCH_END, this._onPanelTouchEnd, this);
     }
 
     // ────────────────────────────────
@@ -53,6 +56,13 @@ export class RewardSelectionPanel extends Component {
         if (!canvas) return;
         this.node.parent = canvas;
         this.node.setSiblingIndex(9999);
+
+        // 面板节点本身必须能接收 UI 事件，才能正确分发到子节点卡片
+        let panelUt = this.node.getComponent(UITransform);
+        if (!panelUt) {
+            panelUt = this.node.addComponent(UITransform);
+        }
+        panelUt.setContentSize(2000, 2000);
 
         // 以当前相机视口为基准，确保遮罩和卡片布局在不同分辨率下都可见且不溢出
         const canvasComp = canvas.getComponent(Canvas);
@@ -110,6 +120,7 @@ export class RewardSelectionPanel extends Component {
 
     private _onRewardShow(payload: { wave: number; options: RewardOption[] }): void {
         this._clearCards();
+        console.log('[RewardSelectionPanel] _onRewardShow 被调用');
         if (payload.wave === 0) {
             this._titleLabel!.string = '战斗前准备 — 选择初始奖励';
         } else {
@@ -151,42 +162,15 @@ export class RewardSelectionPanel extends Component {
 
         this.node.active = true;
         this.node.setSiblingIndex(9999);
+        console.log(`[RewardSelectionPanel] node.active=${this.node.active}, parent=${this.node.parent?.name}, hasUITransform=${!!this.node.getComponent(UITransform)}`);
         this._isShowing = true;
         this._showTime = performance.now() / 1000;
         this._selectedIndex = -1;
-
-        // 注册全局输入事件（同时支持触摸和鼠标，绕过 Cocos 节点事件不冒泡的问题）
-        input.on(Input.EventType.TOUCH_END, this._onGlobalTouchEnd, this);
-        input.on(Input.EventType.MOUSE_UP, this._onGlobalMouseUp, this);
 
         // 底部确定按钮
         this._createConfirmButton(halfH);
 
         console.log('[RewardSelectionPanel] 面板已显示，等待选择...');
-    }
-
-    /**
-     * 全局 TOUCH_END 回调：手动检测点击位置是否在卡片范围内
-     * 原因：Cocos 3.x 节点事件不冒泡，_bgNode/Label 会拦截卡片事件，导致卡片 on(TOUCH_END) 无法触发
-     */
-    private _onGlobalTouchEnd(event: EventTouch): void {
-        if (!this._isShowing || this._isInCooldown()) return;
-        // 使用 Cocos 内置坐标转换，避免 UI 坐标系与 panel 尺寸不一致导致偏移
-        const localPos = this._convertToLocal(event.getUILocation());
-        this._trySelectCard(localPos.x, localPos.y);
-    }
-
-    private _onGlobalMouseUp(event: EventMouse): void {
-        if (!this._isShowing || this._isInCooldown()) return;
-        // 鼠标屏幕坐标 → UI 坐标（左下角原点）
-        const screenLoc = event.getLocation();
-        const screenSize = screen.windowSize;
-        const uiPos = {
-            x: screenLoc.x * (this._panelW / screenSize.width),
-            y: (screenSize.height - screenLoc.y) * (this._panelH / screenSize.height),
-        };
-        const localPos = this._convertToLocal(uiPos);
-        this._trySelectCard(localPos.x, localPos.y);
     }
 
     /** 面板刚显示时忽略输入，避免移动手指的释放事件误选奖励 */
@@ -195,50 +179,100 @@ export class RewardSelectionPanel extends Component {
         return elapsed < RewardSelectionPanel._inputCooldown;
     }
 
-    /**
-     * 将 UI 坐标（左下角原点）转换为 this.node 局部坐标。
-     * 这里使用节点自身的 UITransform.convertToNodeSpaceAR，与 Cocos 适配层保持一致。
-     */
-    private _convertToLocal(uiPos: { x: number; y: number }): { x: number; y: number } {
-        const out = new Vec3();
-        // UI 坐标是 Vec3（z=0），传入 convertToNodeSpaceAR 得到局部坐标
-        this.node.getComponent(UITransform)?.convertToNodeSpaceAR(new Vec3(uiPos.x, uiPos.y, 0), out);
-        return { x: out.x, y: out.y };
+    /** 将全局屏幕像素坐标转换为面板局部坐标（适配 Cocos Canvas 坐标系） */
+    private _screenToPanelLocal(screenPos: { x: number; y: number }): Vec3 | null {
+        const canvas = this.node.parent;
+        if (!canvas) return null;
+        const canvasUt = canvas.getComponent(UITransform);
+        if (!canvasUt) return null;
+
+        const ws = screen.windowSize;
+        if (ws.width <= 0 || ws.height <= 0) return null;
+
+        const canvasComp = canvas.getComponent(Canvas);
+        const cam = canvasComp?.cameraComponent;
+        if (!cam) return null;
+
+        // 屏幕像素 -> 以屏幕中心为原点的归一化偏移（-1 ~ 1）
+        const nx = (screenPos.x / ws.width - 0.5) * 2;
+        const ny = (screenPos.y / ws.height - 0.5) * 2;
+
+        // 相机在当前分辨率下的可视半宽高（世界单位）
+        const halfH = cam.orthoHeight;
+        const halfW = halfH * (ws.width / ws.height);
+
+        // 面板在 Canvas 下的局部坐标 = 面板锚点位置
+        const panelPos = this.node.getPosition();
+
+        // 触摸点在面板局部坐标系中的位置
+        return new Vec3(
+            cam.node.position.x + nx * halfW - panelPos.x,
+            cam.node.position.y + ny * halfH - panelPos.y,
+            0,
+        );
     }
 
-    private _trySelectCard(localX: number, localY: number): void {
-        // 优先检测是否点击了确定按钮
-        if (this._confirmBtnNode && this._confirmBtnNode.active) {
-            const btnPos = this._confirmBtnNode.position;
-            const btnUt = this._confirmBtnNode.getComponent(UITransform);
-            if (btnUt) {
-                const halfBW = btnUt.width / 2;
-                const halfBH = btnUt.height / 2;
-                if (localX >= btnPos.x - halfBW && localX <= btnPos.x + halfBW &&
-                    localY >= btnPos.y - halfBH && localY <= btnPos.y + halfBH) {
-                    this._onConfirmClick();
-                    return;
-                }
-            }
-        }
+    /** 根据全局触摸坐标判断点击了哪张卡片，-1 表示没有点中卡片 */
+    private _hitCardIndex(screenPos: { x: number; y: number }): number {
+        const panelLocal = this._screenToPanelLocal(screenPos);
+        if (!panelLocal) return -1;
 
         for (let i = 0; i < this._cardNodes.length; i++) {
             const card = this._cardNodes[i];
             if (!card.isValid) continue;
-
-            const cardPos = card.position;
             const cardUt = card.getComponent(UITransform);
             if (!cardUt) continue;
-
-            const halfW = cardUt.width / 2;
-            const halfH = cardUt.height / 2;
-
-            if (localX >= cardPos.x - halfW && localX <= cardPos.x + halfW &&
-                localY >= cardPos.y - halfH && localY <= cardPos.y + halfH) {
-                this._selectCard(i);
-                return;
+            const cardPos = card.getPosition();
+            const halfW = cardUt.contentSize.width / 2;
+            const halfH = cardUt.contentSize.height / 2;
+            const localInCard = new Vec3(panelLocal.x - cardPos.x, panelLocal.y - cardPos.y, 0);
+            if (localInCard.x >= -halfW && localInCard.x <= halfW &&
+                localInCard.y >= -halfH && localInCard.y <= halfH) {
+                return i;
             }
         }
+        return -1;
+    }
+
+    /** 判断点击是否在确定按钮内 */
+    private _hitConfirmButton(screenPos: { x: number; y: number }): boolean {
+        if (!this._confirmBtnNode || !this._confirmBtnNode.isValid) return false;
+        const panelLocal = this._screenToPanelLocal(screenPos);
+        if (!panelLocal) return false;
+        const btnPos = this._confirmBtnNode.getPosition();
+        const btnUt = this._confirmBtnNode.getComponent(UITransform);
+        if (!btnUt) return false;
+        const halfW = btnUt.contentSize.width / 2;
+        const halfH = btnUt.contentSize.height / 2;
+        const localInBtn = new Vec3(panelLocal.x - btnPos.x, panelLocal.y - btnPos.y, 0);
+        return localInBtn.x >= -halfW && localInBtn.x <= halfW &&
+               localInBtn.y >= -halfH && localInBtn.y <= halfH;
+    }
+
+    private _onPanelTouchStart(event: any): void {
+        if (!this._isShowing || this._isInCooldown()) return;
+        const loc = event.getLocation ? event.getLocation() : { x: event.x, y: event.y };
+        console.log(`[RewardSelectionPanel] 全局 TOUCH_START: ${loc.x}, ${loc.y}`);
+    }
+
+    private _onPanelTouchEnd(event: any): void {
+        if (!this._isShowing || this._isInCooldown()) return;
+        const loc = event.getLocation ? event.getLocation() : { x: event.x, y: event.y };
+        console.log(`[RewardSelectionPanel] 全局 TOUCH_END: ${loc.x}, ${loc.y}`);
+        const panelLocal = this._screenToPanelLocal(loc);
+        console.log(`[RewardSelectionPanel] 转换后面板局部坐标: ${panelLocal?.x.toFixed(2)}, ${panelLocal?.y.toFixed(2)}`);
+        const cardIndex = this._hitCardIndex(loc);
+        if (cardIndex >= 0) {
+            console.log(`[RewardSelectionPanel] 命中卡片 ${cardIndex}`);
+            this._selectCard(cardIndex);
+            return;
+        }
+        if (this._hitConfirmButton(loc)) {
+            console.log('[RewardSelectionPanel] 命中确定按钮');
+            this._onConfirmClick();
+            return;
+        }
+        console.log('[RewardSelectionPanel] 未命中任何可点击区域');
     }
 
     private _selectCard(index: number): void {
@@ -281,6 +315,16 @@ export class RewardSelectionPanel extends Component {
 
         this._confirmBtnNode = btnNode;
         this._updateConfirmButtonState();
+
+        // 注册节点点击事件（同时监听 TOUCH_START，防止某些设备上 TOUCH_END 不冒泡）
+        const onBtnClick = () => {
+            if (this._isInCooldown()) return;
+            console.log('[RewardSelectionPanel] 确定按钮点击触发');
+            this._onConfirmClick();
+        };
+        btnNode.on(Node.EventType.TOUCH_START, onBtnClick, this);
+        btnNode.on(Node.EventType.TOUCH_END, onBtnClick, this);
+        btnNode.on(Node.EventType.MOUSE_UP, onBtnClick, this);
     }
 
     private _updateConfirmButtonState(): void {
@@ -314,8 +358,6 @@ export class RewardSelectionPanel extends Component {
         this.node.active = false;
         this._clearCards();
         this._selectedIndex = -1;
-        input.off(Input.EventType.TOUCH_END, this._onGlobalTouchEnd, this);
-        input.off(Input.EventType.MOUSE_UP, this._onGlobalMouseUp, this);
         this._respawnPlayer();
     }
 
@@ -373,6 +415,16 @@ export class RewardSelectionPanel extends Component {
         borderG.stroke();
         borderNode.active = false;
 
+        // 注册节点点击事件（同时监听 TOUCH_START，防止某些设备上 TOUCH_END 不冒泡）
+        const onCardClick = () => {
+            if (this._isInCooldown()) return;
+            console.log(`[RewardSelectionPanel] 卡片 ${index} 点击触发`);
+            this._selectCard(index);
+        };
+        card.on(Node.EventType.TOUCH_START, onCardClick, this);
+        card.on(Node.EventType.TOUCH_END, onCardClick, this);
+        card.on(Node.EventType.MOUSE_UP, onCardClick, this);
+
         return card;
     }
 
@@ -410,12 +462,18 @@ export class RewardSelectionPanel extends Component {
     private _clearCards(): void {
         for (const card of this._cardNodes) {
             if (card.isValid) {
+                card.off(Node.EventType.TOUCH_START);
+                card.off(Node.EventType.TOUCH_END);
+                card.off(Node.EventType.MOUSE_UP);
                 card.removeFromParent();
             }
         }
         this._cardNodes.length = 0;
         this._selectedIndex = -1;
         if (this._confirmBtnNode && this._confirmBtnNode.isValid) {
+            this._confirmBtnNode.off(Node.EventType.TOUCH_START);
+            this._confirmBtnNode.off(Node.EventType.TOUCH_END);
+            this._confirmBtnNode.off(Node.EventType.MOUSE_UP);
             this._confirmBtnNode.removeFromParent();
             this._confirmBtnNode = null;
             this._confirmBtnBg = null;

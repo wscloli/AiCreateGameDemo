@@ -1,8 +1,9 @@
 ﻿{
   "mcpServers": {
     "cocos-creator-mcp": {
-      "type": "http",
-      "url": "http://127.0.0.1:3000/mcp"
+      "type": "stdio",
+      "command": "D:/Node.js/node.exe",
+      "args": ["D:/WorkLib/test/NewProject_1/extensions/cocos-creator-mcp/client/stdio-bridge.js"]
     }
   }
 }

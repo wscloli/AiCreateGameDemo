@@ -55,8 +55,23 @@ export class WeaponSystem extends Component {
     @property
     public bulletLifetime: number = 3.0;
 
-    /** 额外散射子弹数量 */
+    /** 额外连发子弹数量 */
     public extraMultishot: number = 0;
+
+    /** 连发子弹间隔（秒）：multishot 的额外子弹按此间隔依次发射 */
+    private readonly _burstInterval: number = 0.06;
+
+    /** 当前连发任务剩余子弹数 */
+    private _burstRemaining: number = 0;
+
+    /** 连发任务计时器 */
+    private _burstTimer: number = 0;
+
+    /** 连发方向缓存 */
+    private _burstDirection: Vec2 = new Vec2();
+
+    /** 连发元素缓存 */
+    private _burstElement: ElementType = ElementType.NONE;
 
     /** 动态施法序列（初始为空） */
     private _spellQueue: ElementType[] = [];
@@ -96,13 +111,25 @@ export class WeaponSystem extends Component {
      * 累加冷却计时器，到点且射程内有敌人才发射
      */
     public tick(dt: number): void {
+        // 先结算连发：让额外子弹以 _burstInterval 为间隔快速射出
+        if (this._burstRemaining > 0) {
+            this._burstTimer -= dt;
+            if (this._burstTimer <= 0) {
+                this._fireBurst();
+                this._burstRemaining--;
+                if (this._burstRemaining > 0) {
+                    this._burstTimer = this._burstInterval;
+                }
+            }
+        }
+
         this._fireTimer += dt;
 
         if (this._fireTimer >= this.currentFireInterval) {
             const target = this._findNearestEnemy();
             if (target && target.distance <= this.currentAttackRange) {
                 this._fireTimer = 0;
-                this._fire(target.direction);
+                this._fireMain(target.direction);
             }
             // 射程内无敌人：保持 _fireTimer（不重置），等敌人进入射程立即发射
         }
@@ -112,7 +139,7 @@ export class WeaponSystem extends Component {
     //  核心逻辑
     // ────────────────────────────────
 
-    private _fire(direction: Vec2): void {
+    private _fireMain(direction: Vec2): void {
         // 确定本次发射的元素：队列为空则用 NONE（BasicBullet）
         let element: ElementType = ElementType.NONE;
         if (this._spellQueue.length > 0) {
@@ -130,25 +157,24 @@ export class WeaponSystem extends Component {
             maxLifetime: this.bulletLifetime,
         });
 
-        // 散射弹（如果有 multishot）
+        // 初始化连发：额外子弹在极短间隔内沿同一方向依次射出
         if (this.extraMultishot > 0) {
-            const baseAngle = Math.atan2(direction.y, direction.x);
-            const spreadStep = Math.PI / 8; // 22.5° 间隔
-            const startOffset = -((this.extraMultishot - 1) * spreadStep) / 2;
-
-            for (let i = 0; i < this.extraMultishot; i++) {
-                const angle = baseAngle + startOffset + spreadStep * i;
-                const spreadDir = new Vec2(Math.cos(angle), Math.sin(angle));
-                BulletFactory.spawnBullet({
-                    position: this.node.position.clone(),
-                    direction: spreadDir,
-                    element,
-                    damage: this.currentDamage,
-                    speed: this.currentSpeed,
-                    maxLifetime: this.bulletLifetime,
-                });
-            }
+            this._burstRemaining = this.extraMultishot;
+            this._burstDirection.set(direction.x, direction.y);
+            this._burstElement = element;
+            this._burstTimer = this._burstInterval;
         }
+    }
+
+    private _fireBurst(): void {
+        BulletFactory.spawnBullet({
+            position: this.node.position.clone(),
+            direction: this._burstDirection,
+            element: this._burstElement,
+            damage: this.currentDamage,
+            speed: this.currentSpeed,
+            maxLifetime: this.bulletLifetime,
+        });
     }
 
     /** 查找最近敌人，返回方向和距离 */
